@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grid Snake — Spectator</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+        overflow: hidden;
+        background: radial-gradient(1400px 1000px at 50% 28%, #14304a, #06101b 72%);
+        color: #eaf4fb;
+        user-select: none;
+      }
+      #board { display: block; position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; }
+      #board.dragging { cursor: grabbing; }
+
+      /* Soft vignette over everything to frame the view. */
+      #vignette {
+        position: fixed; inset: 0; z-index: 1; pointer-events: none;
+        box-shadow: inset 0 0 240px 40px rgba(0, 0, 0, 0.55);
+      }
+
+      .overlay { position: fixed; z-index: 2; }
+      #hud {
+        top: 16px; left: 16px;
+        display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+      }
+      .chip {
+        background: rgba(13, 32, 48, 0.6);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(120, 180, 220, 0.22);
+        border-radius: 999px;
+        padding: 6px 14px;
+        font-weight: 600;
+        color: #d6ecf8;
+        box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+      }
+      .chip b { color: #5fd0ff; }
+      .chip.title { font-size: 15px; letter-spacing: .2px; }
+      a.chip.link { text-decoration: none; color: #bfe0ff; cursor: pointer; }
+      a.chip.link:hover { border-color: #5fd0ff; color: #eaf4fb; }
+      #followChip { display: none; gap: 8px; align-items: center; }
+      #followChip.on { display: inline-flex; }
+      #followChip .x { cursor: pointer; opacity: .7; font-weight: 700; }
+      #followChip .x:hover { opacity: 1; }
+
+      /* Right-hand column: live + all-time boards stacked */
+      #rightCol {
+        top: 16px; right: 16px; width: 280px;
+        display: flex; flex-direction: column; gap: 12px;
+        max-height: calc(100vh - 32px);
+      }
+      .card {
+        background: rgba(11, 30, 44, 0.62);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 12px 12px 8px;
+        color: #eaf4fb;
+        box-shadow: 0 10px 40px rgba(10, 30, 50, 0.35);
+        overflow: hidden auto;
+      }
+      #lbCard { flex: 1 1 auto; min-height: 120px; }
+      #statsCard { flex: 0 0 auto; max-height: 42%; }
+      .card h2 {
+        margin: 2px 6px 10px; font-size: 12px; letter-spacing: .6px;
+        text-transform: uppercase; color: #9fc6dc;
+        display: flex; justify-content: space-between; align-items: baseline;
+      }
+      .card h2 .hint { font-weight: 600; color: #6f97ae; text-transform: none; letter-spacing: 0; font-size: 10px; }
+
+      .strow {
+        display: flex; align-items: center; gap: 8px;
+        padding: 4px 8px; border-radius: 8px; font-size: 13px;
+      }
+      .strow.head { color: #7ba3bc; font-size: 10px; text-transform: uppercase; letter-spacing: .5px; padding-bottom: 2px; }
+      .strow .rk { width: 16px; text-align: right; color: #8fb6cd; font-variant-numeric: tabular-nums; }
+      .strow .nm { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .strow .v { width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+      .strow .v.win { color: #ffd54a; font-weight: 700; }
+      .strow .v.max { color: #5fd0ff; }
+      .strow:not(.head):nth-child(even) { background: rgba(255,255,255,0.03); }
+      .lbrow {
+        display: flex; align-items: center; gap: 9px;
+        padding: 5px 8px; border-radius: 10px; margin-bottom: 2px; cursor: pointer;
+      }
+      .lbrow:hover { background: rgba(120, 180, 220, 0.12); }
+      .lbrow.followed { background: rgba(95, 178, 255, 0.22); box-shadow: inset 0 0 0 1px rgba(95,178,255,.4); }
+      .lbrow.dead { opacity: .42; }
+      .lbrow .rk { width: 16px; text-align: right; color: #8fb6cd; font-variant-numeric: tabular-nums; }
+      .lbrow .sw { width: 11px; height: 11px; border-radius: 50%; flex: none; box-shadow: 0 0 8px -1px currentColor; }
+      .lbrow .nm { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .lbrow .ai { font-size: 9px; padding: 1px 6px; border-radius: 999px; background: rgba(95,178,255,.25); color: #bfe0ff; letter-spacing: .4px; }
+      .lbrow .sz { font-variant-numeric: tabular-nums; color: #cfe6f4; }
+
+      /* Legend / status, bottom-left */
+      #foot { bottom: 16px; left: 16px; display: flex; gap: 8px; align-items: center; }
+      .dotleg { display: inline-flex; align-items: center; gap: 5px; }
+      .dotleg i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
+      /* Camera controls, bottom-right (above minimap) */
+      #controls {
+        right: 16px; bottom: 188px;
+        display: flex; flex-direction: column; gap: 6px; align-items: stretch;
+      }
+      .btn {
+        min-width: 44px; height: 36px; padding: 0 10px;
+        background: rgba(13, 32, 48, 0.7);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(120, 180, 220, 0.25);
+        border-radius: 10px;
+        color: #d6ecf8; font-weight: 700; font-size: 13px; cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+      }
+      .btn:hover { background: rgba(28, 56, 80, 0.85); border-color: rgba(95, 208, 255, 0.5); }
+      .btn:active { transform: translateY(1px); }
+      .btn.zoom { font-size: 18px; }
+
+      /* Minimap, bottom-right corner */
+      #miniWrap {
+        right: 16px; bottom: 16px;
+        padding: 8px; border-radius: 12px;
+        background: rgba(8, 20, 32, 0.66);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(120, 180, 220, 0.22);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+      }
+      #minimap { display: block; cursor: pointer; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <canvas id="board"></canvas>
+    <div id="vignette"></div>
+
+    <div id="hud" class="overlay">
+      <span class="chip title">Grid Snake</span>
+      <a class="chip link" href="/account.html">Sign in / Account</a>
+      <a class="chip link" href="/guide.html">How to play</a>
+      <span class="chip">Round <b id="round">–</b></span>
+      <span class="chip">Tick <b id="tick">0</b></span>
+      <span class="chip">Alive <b id="alive">0</b></span>
+      <span class="chip" id="followChip">Following <b id="followName">–</b><span class="x" id="unfollow">✕</span></span>
+    </div>
+
+    <div id="rightCol" class="overlay">
+      <div id="lbCard" class="card">
+        <h2>This round <span class="hint">click to follow</span></h2>
+        <div id="leaderboard"></div>
+      </div>
+      <div id="statsCard" class="card">
+        <h2>All-time <span class="hint">wins · best</span></h2>
+        <div id="stats"></div>
+      </div>
+    </div>
+
+    <div id="foot" class="overlay">
+      <span class="chip" id="status">Connecting…</span>
+      <span class="chip">
+        <span class="dotleg"><i style="background:#ffe34d;box-shadow:0 0 8px #ffe34d"></i>+1</span>&nbsp;
+        <span class="dotleg"><i style="background:#ff8f3a;box-shadow:0 0 8px #ff8f3a"></i>+3</span>&nbsp;
+        <span class="dotleg"><i style="background:#ff4fd8;box-shadow:0 0 8px #ff4fd8"></i>+6</span>&nbsp;
+        <span class="dotleg"><i style="background:#a06bff;box-shadow:0 0 8px #a06bff;border-radius:2px"></i>frenzy</span>&nbsp;
+        <span class="dotleg"><i style="background:#37506a;border-radius:2px"></i>wall</span>
+      </span>
+    </div>
+
+    <div id="controls" class="overlay">
+      <button class="btn" id="btnFull" title="Fill screen (C)">Fill</button>
+      <button class="btn" id="btnFit" title="Fit whole board (F)">Fit</button>
+      <button class="btn zoom" id="btnIn" title="Zoom in (+)">+</button>
+      <button class="btn zoom" id="btnOut" title="Zoom out (−)">−</button>
+    </div>
+
+    <div id="miniWrap" class="overlay">
+      <canvas id="minimap" width="160" height="160"></canvas>
+    </div>
+
+    <script>
+      const canvas = document.getElementById("board");
+      const ctx = canvas.getContext("2d");
+      const mini = document.getElementById("minimap");
+      const mctx = mini.getContext("2d");
+      const els = {
+        round: document.getElementById("round"),
+        tick: document.getElementById("tick"),
+        alive: document.getElementById("alive"),
+        lb: document.getElementById("leaderboard"),
+        stats: document.getElementById("stats"),
+        status: document.getElementById("status"),
+        followChip: document.getElementById("followChip"),
+        followName: document.getElementById("followName"),
+      };
+
+      let world = { width: 200, height: 200 };
+      let obstacles = [];
+      let prev = null;   // previous frame (for interpolation)
+      let cur = null;    // latest frame
+      let tickMs = 2000; // measured gap between frames
+      let follow = null; // snake id to follow, or null
+
+      // Camera: cam.x/cam.y is the world cell at screen centre; cam.scale = px/cell.
+      let cam = { x: 100, y: 100, scale: 6 };
+      let camT = { x: 100, y: 100, scale: 6 };
+      let mode = "full"; // full | fit | follow | free
+      let camReady = false;
+      let W = 0, H = 0, DPR = 1;
+
+      // FNV-1a hash → well-spread, stable colour per snake id.
+      function hashId(id) {
+        let h = 2166136261;
+        for (let i = 0; i < id.length; i++) {
+          h ^= id.charCodeAt(i);
+          h = Math.imul(h, 16777619);
+        }
+        return h >>> 0;
+      }
+      const colCache = new Map();
+      function colsFor(id) {
+        let c = colCache.get(id);
+        if (c) return c;
+        const hsh = hashId(id);
+        const hue = hsh % 360;
+        const sat = 68 + (hsh >>> 9) % 24;        // 68–92%
+        const light = 52 + (((hsh >>> 17) % 3) - 1) * 7; // 45/52/59% for extra separation
+        c = {
+          body: `hsl(${hue},${sat}%,${light}%)`,
+          dark: `hsl(${hue},${Math.min(95, sat)}%,${light - 18}%)`,
+          head: `hsl(${hue},${Math.min(98, sat + 8)}%,${light + 12}%)`,
+        };
+        colCache.set(id, c);
+        return c;
+      }
+      const bodyCol = (id) => colsFor(id).body;
+      const darkCol = (id) => colsFor(id).dark;
+      const headCol = (id) => colsFor(id).head;
+      function foodStyle(v) {
+        if (v >= 6) return { col: "#ff4fd8", r: 0.62 };
+        if (v >= 3) return { col: "#ff8f3a", r: 0.52 };
+        return { col: "#ffe34d", r: 0.42 };
+      }
+      const lerp = (a, b, t) => a + (b - a) * t;
+
+      // --- coordinate transforms (use cam) ---
+      const sx = (wx) => (wx - cam.x) * cam.scale + W / 2;
+      const sy = (wy) => (wy - cam.y) * cam.scale + H / 2;
+      const worldX = (px) => (px - W / 2) / cam.scale + cam.x;
+      const worldY = (py) => (py - H / 2) / cam.scale + cam.y;
+
+      function coverScale() { return Math.max(W / world.width, H / world.height); }
+      function fitScale() { return Math.min(W / world.width, H / world.height) * 0.98; }
+
+      function applyMode() {
+        if (mode === "full") {
+          camT.scale = coverScale();
+          camT.x = world.width / 2;
+          camT.y = world.height / 2;
+        } else if (mode === "fit") {
+          camT.scale = fitScale();
+          camT.x = world.width / 2;
+          camT.y = world.height / 2;
+        } else if (mode === "follow" && cur) {
+          const s = cur.snakes.find((s) => s.id === follow && s.alive && s.body.length);
+          if (s) {
+            const p = interpHead(s);
+            camT.x = p.x;
+            camT.y = p.y;
+          } else {
+            setMode("full");
+          }
+        }
+        // 'free' leaves camT alone (driven by user input).
+      }
+
+      function setMode(m) {
+        mode = m;
+        if (m !== "follow") {
+          follow = null;
+          els.followChip.classList.remove("on");
+        }
+        applyMode();
+        if (!camReady) { cam = { ...camT }; camReady = true; }
+      }
+
+      function setFollow(id) {
+        const s = cur && cur.snakes.find((s) => s.id === id);
+        if (!s) return;
+        follow = id;
+        mode = "follow";
+        els.followName.textContent = s.displayName;
+        els.followChip.classList.add("on");
+        renderLeaderboard();
+      }
+
+      function resize() {
+        DPR = window.devicePixelRatio || 1;
+        W = window.innerWidth;
+        H = window.innerHeight;
+        canvas.width = Math.floor(W * DPR);
+        canvas.height = Math.floor(H * DPR);
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+        applyMode();
+      }
+
+      // --- interpolation between ticks ---
+      function interpT() {
+        if (!cur) return 1;
+        return Math.max(0, Math.min(1, (performance.now() - cur.recvT) / tickMs));
+      }
+      function interpHead(s) {
+        const t = interpT();
+        const c = s.body[0];
+        let px = c, py = c;
+        const ps = prev && prev.byId ? prev.byId.get(s.id) : null;
+        const p = ps && ps.body.length ? ps.body[0] : c;
+        return { x: lerp(p.x, c.x, t) + 0.5, y: lerp(p.y, c.y, t) + 0.5 };
+      }
+      function interpBody(s) {
+        const t = interpT();
+        const ps = prev && prev.byId ? prev.byId.get(s.id) : null;
+        return s.body.map((c, i) => {
+          const p = ps && ps.body.length ? (ps.body[i] ?? ps.body[ps.body.length - 1]) : c;
+          return { x: lerp(p.x, c.x, t) + 0.5, y: lerp(p.y, c.y, t) + 0.5 };
+        });
+      }
+
+      // --- main render loop ---
+      function tickCamera() {
+        if (mode !== "free") applyMode();
+        const k = mode === "follow" ? 0.18 : 0.2;
+        cam.x = lerp(cam.x, camT.x, k);
+        cam.y = lerp(cam.y, camT.y, k);
+        cam.scale = lerp(cam.scale, camT.scale, 0.2);
+      }
+
+      function loop() {
+        tickCamera();
+        draw();
+        drawMinimap();
+        requestAnimationFrame(loop);
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, W, H);
+
+        // Board panel (world bounds) drawn in screen space.
+        const bx = sx(0), by = sy(0);
+        const bw = world.width * cam.scale, bh = world.height * cam.scale;
+        ctx.save();
+        ctx.beginPath();
+        ctx.roundRect(bx, by, bw, bh, Math.min(16, cam.scale * 2));
+        const g = ctx.createRadialGradient(bx + bw / 2, by + bh * 0.4, 0, bx + bw / 2, by + bh * 0.4, Math.max(bw, bh));
+        g.addColorStop(0, "#10283e");
+        g.addColorStop(0.6, "#0b1d2d");
+        g.addColorStop(1, "#06121e");
+        ctx.fillStyle = g;
+        ctx.fill();
+        ctx.clip();
+        drawHoneycomb(bx, by, bw, bh);
+
+        // Obstacles — solid slate blocks with an edge and top highlight so they read as walls.
+        if (obstacles.length) {
+          const og = Math.max(0.4, cam.scale * 0.06);
+          const sz = cam.scale - og;
+          ctx.fillStyle = "#4a6684";
+          for (const o of obstacles) ctx.fillRect(sx(o.x), sy(o.y), sz, sz);
+          if (cam.scale >= 3) {
+            ctx.strokeStyle = "rgba(8,16,26,0.7)";
+            ctx.lineWidth = 1;
+            for (const o of obstacles) ctx.strokeRect(sx(o.x) + 0.5, sy(o.y) + 0.5, sz - 1, sz - 1);
+            ctx.fillStyle = "rgba(180,205,230,0.22)";
+            for (const o of obstacles) ctx.fillRect(sx(o.x), sy(o.y), sz, Math.max(1, cam.scale * 0.26));
+          }
+        }
+
+        if (cur) {
+          // Food.
+          ctx.save();
+          for (const f of cur.food) {
+            const st = foodStyle(f.value);
+            const r = Math.max(1.4, cam.scale * st.r);
+            const x = sx(f.x + 0.5), y = sy(f.y + 0.5);
+            ctx.shadowColor = st.col;
+            ctx.shadowBlur = r * 2;
+            ctx.fillStyle = st.col;
+            ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+            if (cam.scale >= 6) {
+              ctx.shadowBlur = 0;
+              ctx.fillStyle = "rgba(255,255,255,0.75)";
+              ctx.beginPath(); ctx.arc(x - r * 0.3, y - r * 0.3, r * 0.3, 0, 7); ctx.fill();
+            }
+          }
+          ctx.restore();
+
+          // Power-ups (frenzy diamonds).
+          if (cur.powerUps && cur.powerUps.length) {
+            const pulse = 0.78 + 0.22 * Math.sin(performance.now() / 250);
+            const r = Math.max(2, cam.scale * 0.62) * pulse;
+            ctx.save();
+            ctx.fillStyle = "#a06bff";
+            ctx.shadowColor = "#a06bff";
+            ctx.shadowBlur = r * 2.2;
+            for (const p of cur.powerUps) {
+              const x = sx(p.x + 0.5), y = sy(p.y + 0.5);
+              ctx.beginPath();
+              ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y);
+              ctx.closePath(); ctx.fill();
+            }
+            ctx.restore();
+          }
+
+          // Snakes.
+          for (const s of cur.snakes) {
+            if (!s.alive || !s.body.length) continue;
+            drawSnake(s);
+          }
+        }
+        ctx.restore();
+
+        // Play-boundary rim.
+        ctx.save();
+        ctx.beginPath();
+        ctx.roundRect(bx, by, bw, bh, Math.min(16, cam.scale * 2));
+        ctx.strokeStyle = "rgba(95,208,255,0.4)";
+        ctx.lineWidth = 2;
+        ctx.shadowColor = "rgba(95,208,255,0.35)";
+        ctx.shadowBlur = 14;
+        ctx.stroke();
+        ctx.restore();
+
+        if (!cur) return;
+        // Name labels (+ combo badge) — only when not too tiny.
+        if (cam.scale >= 3) {
+          ctx.font = "700 12px 'Segoe UI', system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "bottom";
+          for (const s of cur.snakes) {
+            if (!s.alive || !s.body.length) continue;
+            const h = interpHead(s);
+            const x = sx(h.x), y = sy(h.y) - cam.scale * 0.7 - 4;
+            let label = s.displayName;
+            if (s.combo > 1) label += `  x${s.combo}`;
+            ctx.lineWidth = 3.5;
+            ctx.strokeStyle = "rgba(4,14,22,0.85)";
+            ctx.strokeText(label, x, y);
+            ctx.fillStyle = headCol(s.id);
+            ctx.fillText(label, x, y);
+          }
+        }
+      }
+
+      function drawHoneycomb(bx, by, bw, bh) {
+        const r = Math.max(14, cam.scale * 5);
+        if (r > 220) return;
+        ctx.strokeStyle = "rgba(120,180,220,0.05)";
+        ctx.lineWidth = 1;
+        const dx = r * 1.5, dy = Math.sqrt(3) * r;
+        const x0 = bx - ((bx % dx) + dx) % dx;
+        let col = Math.round((x0 - bx) / dx);
+        for (let x = x0; x <= bx + bw + r; x += dx, col++) {
+          const yoff = ((col % 2) + 2) % 2 ? dy / 2 : 0;
+          for (let y = by - dy; y <= by + bh + dy; y += dy) {
+            ctx.beginPath();
+            for (let i = 0; i < 6; i++) {
+              const a = (Math.PI / 180) * (60 * i);
+              const px = x + r * Math.cos(a);
+              const py = y + yoff + r * Math.sin(a);
+              i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+            }
+            ctx.closePath();
+            ctx.stroke();
+          }
+        }
+      }
+
+      function drawSnake(s) {
+        const pts = interpBody(s).map((c) => ({ x: sx(c.x), y: sy(c.y) }));
+        const wBody = Math.max(2, cam.scale * 0.92);
+        const followed = s.id === follow;
+
+        if (pts.length > 1) {
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          if (s.frenzy) {
+            ctx.save();
+            ctx.shadowColor = "#a06bff";
+            ctx.shadowBlur = Math.max(6, cam.scale * 1.2);
+            ctx.strokeStyle = "rgba(160,107,255,0.9)";
+            ctx.lineWidth = wBody + Math.max(2, cam.scale * 0.5);
+            strokePath(pts);
+            ctx.restore();
+          }
+          if (followed) {
+            ctx.save();
+            ctx.shadowColor = "#fff";
+            ctx.shadowBlur = Math.max(6, cam.scale);
+            ctx.strokeStyle = "rgba(255,255,255,0.85)";
+            ctx.lineWidth = wBody + Math.max(2, cam.scale * 0.36);
+            strokePath(pts);
+            ctx.restore();
+          }
+          ctx.strokeStyle = darkCol(s.id);
+          ctx.lineWidth = wBody + Math.max(1, cam.scale * 0.18);
+          strokePath(pts);
+          ctx.strokeStyle = bodyCol(s.id);
+          ctx.lineWidth = wBody;
+          strokePath(pts);
+        }
+
+        const h = pts[0];
+        const hr = wBody * 0.62;
+        ctx.fillStyle = darkCol(s.id);
+        ctx.beginPath(); ctx.arc(h.x, h.y, hr + Math.max(0.5, cam.scale * 0.09), 0, 7); ctx.fill();
+        ctx.fillStyle = headCol(s.id);
+        ctx.beginPath(); ctx.arc(h.x, h.y, hr, 0, 7); ctx.fill();
+
+        if (cam.scale >= 4) {
+          const dir = headingVec(pts);
+          const px = -dir.y, py = dir.x;
+          const eo = hr * 0.45, fo = hr * 0.35, er = Math.max(1, hr * 0.32);
+          for (const sgn of [-1, 1]) {
+            const ex = h.x + dir.x * fo + px * eo * sgn;
+            const ey = h.y + dir.y * fo + py * eo * sgn;
+            ctx.fillStyle = "#fff";
+            ctx.beginPath(); ctx.arc(ex, ey, er, 0, 7); ctx.fill();
+            ctx.fillStyle = "#10222e";
+            ctx.beginPath(); ctx.arc(ex + dir.x * er * 0.4, ey + dir.y * er * 0.4, er * 0.55, 0, 7); ctx.fill();
+          }
+        }
+      }
+
+      function headingVec(pts) {
+        if (pts.length < 2) return { x: 1, y: 0 };
+        const dx = pts[0].x - pts[1].x, dy = pts[0].y - pts[1].y;
+        const m = Math.hypot(dx, dy) || 1;
+        return { x: dx / m, y: dy / m };
+      }
+      function strokePath(pts) {
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.stroke();
+      }
+
+      // --- minimap ---
+      function drawMinimap() {
+        const MS = 160;
+        const s = Math.min(MS / world.width, MS / world.height);
+        const ox = (MS - world.width * s) / 2;
+        const oy = (MS - world.height * s) / 2;
+        mctx.clearRect(0, 0, MS, MS);
+        mctx.fillStyle = "#0a1a29";
+        mctx.fillRect(ox, oy, world.width * s, world.height * s);
+
+        if (obstacles.length && obstacles.length < 4000) {
+          mctx.fillStyle = "rgba(80,110,140,0.7)";
+          for (const o of obstacles) mctx.fillRect(ox + o.x * s, oy + o.y * s, Math.max(1, s), Math.max(1, s));
+        }
+        if (cur) {
+          // Draw a faint trail of each snake's body, then a bright head dot.
+          for (const sn of cur.snakes) {
+            if (!sn.alive || !sn.body.length) continue;
+            mctx.strokeStyle = bodyCol(sn.id);
+            mctx.globalAlpha = 0.5;
+            mctx.lineWidth = 1;
+            mctx.beginPath();
+            sn.body.forEach((c, i) => {
+              const mx = ox + (c.x + 0.5) * s, my = oy + (c.y + 0.5) * s;
+              i ? mctx.lineTo(mx, my) : mctx.moveTo(mx, my);
+            });
+            mctx.stroke();
+            mctx.globalAlpha = 1;
+          }
+          for (const sn of cur.snakes) {
+            if (!sn.alive || !sn.body.length) continue;
+            const followed = sn.id === follow;
+            mctx.fillStyle = followed ? "#fff" : headCol(sn.id);
+            const hd = sn.body[0];
+            mctx.beginPath();
+            mctx.arc(ox + (hd.x + 0.5) * s, oy + (hd.y + 0.5) * s, followed ? 3.5 : 2.2, 0, 7);
+            mctx.fill();
+          }
+        }
+        // Viewport rectangle.
+        const vx0 = ox + worldX(0) * s, vy0 = oy + worldY(0) * s;
+        const vw = (W / cam.scale) * s, vh = (H / cam.scale) * s;
+        mctx.strokeStyle = "rgba(95,208,255,0.9)";
+        mctx.lineWidth = 1.5;
+        mctx.strokeRect(vx0, vy0, vw, vh);
+      }
+
+      mini.addEventListener("click", (e) => {
+        const rect = mini.getBoundingClientRect();
+        const MS = 160;
+        const s = Math.min(MS / world.width, MS / world.height);
+        const ox = (MS - world.width * s) / 2;
+        const oy = (MS - world.height * s) / 2;
+        camT.x = (e.clientX - rect.left - ox) / s;
+        camT.y = (e.clientY - rect.top - oy) / s;
+        mode = "free";
+        follow = null;
+        els.followChip.classList.remove("on");
+      });
+
+      // --- pan / zoom / click-to-follow ---
+      let down = false, moved = false, lastX = 0, lastY = 0;
+      canvas.addEventListener("mousedown", (e) => {
+        down = true; moved = false; lastX = e.clientX; lastY = e.clientY;
+        canvas.classList.add("dragging");
+      });
+      window.addEventListener("mousemove", (e) => {
+        if (!down) return;
+        const ddx = e.clientX - lastX, ddy = e.clientY - lastY;
+        if (Math.abs(ddx) + Math.abs(ddy) > 3) moved = true;
+        lastX = e.clientX; lastY = e.clientY;
+        cam.x -= ddx / cam.scale; cam.y -= ddy / cam.scale;
+        camT.x = cam.x; camT.y = cam.y;
+        mode = "free";
+        follow = null;
+        els.followChip.classList.remove("on");
+      });
+      window.addEventListener("mouseup", () => {
+        canvas.classList.remove("dragging");
+        if (down && !moved) hitFollow(lastX, lastY);
+        down = false;
+      });
+
+      function hitFollow(px, py) {
+        if (!cur) return;
+        const wx = worldX(px), wy = worldY(py);
+        let best = null, bestD = 9;
+        for (const s of cur.snakes) {
+          if (!s.alive || !s.body.length) continue;
+          for (const c of s.body) {
+            const d = (c.x + 0.5 - wx) ** 2 + (c.y + 0.5 - wy) ** 2;
+            if (d < bestD) { bestD = d; best = s.id; }
+          }
+        }
+        if (best) setFollow(best);
+        else setMode("full");
+      }
+
+      function zoomAt(px, py, factor) {
+        const wx = worldX(px), wy = worldY(py);
+        camT.scale = cam.scale = Math.max(1, Math.min(40, cam.scale * factor));
+        // keep the point under the cursor fixed
+        cam.x = wx - (px - W / 2) / cam.scale;
+        cam.y = wy - (py - H / 2) / cam.scale;
+        camT.x = cam.x; camT.y = cam.y;
+        if (mode !== "follow") mode = "free";
+      }
+      canvas.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+      }, { passive: false });
+
+      document.getElementById("btnFull").onclick = () => setMode("full");
+      document.getElementById("btnFit").onclick = () => setMode("fit");
+      document.getElementById("btnIn").onclick = () => zoomAt(W / 2, H / 2, 1.25);
+      document.getElementById("btnOut").onclick = () => zoomAt(W / 2, H / 2, 1 / 1.25);
+      document.getElementById("unfollow").onclick = () => setMode("full");
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "f" || e.key === "F") setMode("fit");
+        else if (e.key === "c" || e.key === "C") setMode("full");
+        else if (e.key === "+" || e.key === "=") zoomAt(W / 2, H / 2, 1.25);
+        else if (e.key === "-" || e.key === "_") zoomAt(W / 2, H / 2, 1 / 1.25);
+        else if (e.key === "Escape") setMode("full");
+      });
+
+      // --- leaderboard ---
+      function renderLeaderboard() {
+        if (!cur) return;
+        const snakes = cur.snakes;
+        const sorted = [...snakes].sort((a, b) => b.size - a.size);
+        els.alive.textContent = snakes.filter((s) => s.alive).length;
+        els.lb.innerHTML = "";
+        sorted.slice(0, 12).forEach((s, i) => {
+          const row = document.createElement("div");
+          row.className = "lbrow" + (s.id === follow ? " followed" : "") + (s.alive ? "" : " dead");
+          row.innerHTML =
+            `<span class="rk">${i + 1}</span>` +
+            `<span class="sw" style="background:${bodyCol(s.id)};color:${bodyCol(s.id)}"></span>` +
+            `<span class="nm">${escapeHtml(s.displayName)}</span>` +
+            (s.isNpc ? "" : `<span class="ai">AI</span>`) +
+            `<span class="sz">${s.size}</span>`;
+          row.onclick = () => setFollow(s.id);
+          els.lb.appendChild(row);
+        });
+      }
+
+      function renderStats(board) {
+        if (!board) return;
+        if (!board.length) {
+          els.stats.innerHTML = `<div class="strow" style="color:#6f97ae">No games recorded yet.</div>`;
+          return;
+        }
+        let html = `<div class="strow head"><span class="rk">#</span><span class="nm">account</span><span class="v">won</span><span class="v">best</span><span class="v">avg</span></div>`;
+        board.slice(0, 10).forEach((s, i) => {
+          html +=
+            `<div class="strow">` +
+            `<span class="rk">${i + 1}</span>` +
+            `<span class="nm">${escapeHtml(s.account)}</span>` +
+            `<span class="v win">${s.wins}</span>` +
+            `<span class="v max">${s.maxSize}</span>` +
+            `<span class="v">${(s.avgSize ?? 0).toFixed(0)}</span>` +
+            `</div>`;
+        });
+        els.stats.innerHTML = html;
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
+        );
+      }
+
+      function setWorld(w) {
+        const changed = w.width !== world.width || w.height !== world.height;
+        world = w;
+        if (changed) camReady = false; // re-frame for a new round size
+        applyMode();
+        if (!camReady) { cam = { ...camT }; camReady = true; }
+      }
+
+      function ingestFrame(f) {
+        f.recvT = performance.now();
+        f.byId = new Map(f.snakes.map((s) => [s.id, s]));
+        if (cur) {
+          const gap = f.recvT - cur.recvT;
+          if (gap > 100 && gap < 6000) tickMs = gap;
+        }
+        prev = cur;
+        cur = f;
+      }
+
+      function connect() {
+        const ws = new WebSocket(`ws://${location.host}/spectate`);
+        ws.onopen = () => (els.status.textContent = "Connected");
+        ws.onmessage = (ev) => {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "init") {
+            obstacles = msg.obstacles || [];
+            setWorld(msg.world);
+            ingestFrame(msg.frame);
+            if (msg.round != null) els.round.textContent = msg.round;
+          } else if (msg.type === "round_start") {
+            obstacles = msg.obstacles || [];
+            prev = null; cur = null;
+            setWorld(msg.world);
+            els.round.textContent = msg.round;
+          } else if (msg.type === "frame") {
+            ingestFrame(msg.frame);
+            els.tick.textContent = msg.frame.tick;
+          } else if (msg.type === "leaderboard") {
+            renderStats(msg.board);
+            return;
+          } else if (msg.type === "round_end") {
+            const why = {
+              all_dead: "everyone died",
+              last_standing: "last snake standing",
+              agents_eliminated: "all agents out",
+              time_limit: "time limit",
+              stalemate: "stalemate",
+            }[msg.reason] || msg.reason || "";
+            const top = msg.standings[0]?.display_name ?? "?";
+            els.status.textContent = `Round ${msg.round}: ${top} won${why ? " (" + why + ")" : ""}`;
+          }
+          if (cur) renderLeaderboard();
+        };
+        ws.onclose = () => {
+          els.status.textContent = "Disconnected — retrying…";
+          setTimeout(connect, 1000);
+        };
+      }
+
+      window.addEventListener("resize", resize);
+      resize();
+      setMode("full");
+      connect();
+      requestAnimationFrame(loop);
+    </script>
+  </body>
+</html>

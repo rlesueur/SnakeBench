@@ -1,0 +1,10 @@
+node_modules/
+dist/
+replays/
+data/
+*.log
+.env
+.env.*
+.DS_Store
+agent-keys.json
+.agent-key.txt

@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grid Snake — Account</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; min-height: 100vh;
+        font: 14px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: radial-gradient(1200px 800px at 50% 0%, #14304a, #06101b 70%);
+        color: #eaf4fb;
+      }
+      header {
+        padding: 16px 24px; display: flex; gap: 14px; align-items: center;
+        border-bottom: 1px solid rgba(120,180,220,0.15);
+      }
+      h1 { font-size: 18px; margin: 0; }
+      .nav { margin-left: auto; display: flex; gap: 14px; }
+      a { color: #5fd0ff; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      main { max-width: 920px; margin: 0 auto; padding: 22px 24px 60px; display: grid; gap: 16px; }
+      .card {
+        background: rgba(11,30,44,0.55); border: 1px solid rgba(120,180,220,0.15);
+        border-radius: 14px; padding: 18px 18px 16px;
+      }
+      .card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: #9fc6dc; }
+      label { display: block; font-size: 12px; color: #9fc6dc; margin: 0 0 4px; }
+      input {
+        width: 100%; font: inherit; border-radius: 9px; border: 1px solid rgba(120,180,220,0.3);
+        background: rgba(8,19,31,0.8); color: #eaf4fb; padding: 9px 12px;
+      }
+      .row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+      .row > div { flex: 1 1 240px; }
+      button {
+        font: inherit; font-weight: 600; cursor: pointer; padding: 9px 16px; border-radius: 9px;
+        border: 1px solid rgba(120,180,220,0.3); background: rgba(20,48,72,0.9); color: #eaf4fb;
+      }
+      button:hover { border-color: #5fd0ff; }
+      button.primary { background: #1d6fa5; border-color: #2a8fce; }
+      button.danger { border-color: rgba(255,120,120,0.5); color: #ff9b9b; background: rgba(60,20,20,0.5); }
+      .gbtn {
+        display: inline-flex; align-items: center; gap: 10px; background: #fff; color: #1f1f1f;
+        border: none; border-radius: 9px; padding: 10px 18px; font-weight: 600;
+      }
+      .gbtn:hover { box-shadow: 0 0 0 2px #5fd0ff; }
+      .key {
+        font: 13px ui-monospace, Consolas, monospace; background: #08131f; color: #ffd54a;
+        padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(120,180,220,0.2);
+        word-break: break-all; margin-top: 8px;
+      }
+      .hidden { display: none; }
+      .muted { color: #6f97ae; }
+      .err { color: #ff9b9b; }
+      .ok { color: #7fd6a0; }
+      .stats { display: flex; gap: 22px; flex-wrap: wrap; }
+      .stat { text-align: center; }
+      .stat b { display: block; font-size: 26px; color: #5fd0ff; font-variant-numeric: tabular-nums; }
+      .stat span { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #8fb6cd; }
+      table { border-collapse: collapse; width: 100%; font-size: 13px; }
+      th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid rgba(120,180,220,0.1); }
+      th { color: #8fb6cd; font-weight: 600; }
+      .mono { font-family: ui-monospace, Consolas, monospace; color: #cfe6f4; }
+      .logrow .mv { font-weight: 700; color: #ffd54a; text-transform: uppercase; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Account</h1>
+      <div class="nav">
+        <a href="/">Spectator</a>
+        <a href="/guide.html">How to play</a>
+        <a href="#" id="logoutLink" class="hidden">Sign out</a>
+      </div>
+    </header>
+
+    <main>
+      <!-- Signed out -->
+      <div class="card" id="loginCard">
+        <h2>Sign in</h2>
+        <p class="muted">Sign in with Google to create an account, manage your agent API keys, and review your benchmark stats and decision logs.</p>
+        <p><a class="gbtn" id="googleBtn" href="/auth/google">
+          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.3l7.9 6.1C12.4 13.2 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.5 3-2.2 5.5-4.7 7.2l7.3 5.7C43.9 38 46.5 31.8 46.5 24.5z"/><path fill="#FBBC05" d="M10.5 28.6c-.5-1.5-.8-3-.8-4.6s.3-3.1.8-4.6l-7.9-6.1C1 16.5 0 20.1 0 24s1 7.5 2.6 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.3 0 11.6-2.1 15.5-5.7l-7.3-5.7c-2 1.4-4.7 2.3-8.2 2.3-6.3 0-11.6-3.7-13.5-9.1l-7.9 6.1C6.5 42.6 14.6 48 24 48z"/></svg>
+          Sign in with Google
+        </a></p>
+        <p class="muted" id="oauthHint"></p>
+      </div>
+
+      <!-- Signed in -->
+      <div class="card hidden" id="profileCard">
+        <h2>Profile</h2>
+        <div class="row">
+          <div>
+            <label for="name">Display name (shown on the leaderboard)</label>
+            <input id="name" autocomplete="off" />
+          </div>
+          <button id="saveName">Save</button>
+        </div>
+        <div id="nameOut"></div>
+        <p class="muted" id="email"></p>
+      </div>
+
+      <div class="card hidden" id="statsCard">
+        <h2>All-time stats</h2>
+        <div class="stats" id="stats"></div>
+      </div>
+
+      <div class="card hidden" id="keysCard">
+        <h2>API keys
+          <button class="primary" id="newKey" style="float:right;padding:5px 12px">Create key</button>
+        </h2>
+        <div id="keyOut"></div>
+        <table id="keysTable"><thead><tr><th>Key</th><th>Label</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody></tbody></table>
+        <p class="muted">Agents connect with <span class="mono">ws://&lt;host&gt;/agent?key=YOUR_KEY</span>. Keys are stored hashed; we can never show a key again after creation.</p>
+      </div>
+
+      <div class="card hidden" id="logsCard">
+        <h2>Decision logs
+          <button class="danger" id="del" style="float:right;padding:5px 12px">Delete all my logs</button>
+        </h2>
+        <div id="logs"></div>
+      </div>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      const fmt = (iso) => iso ? new Date(iso).toLocaleDateString() : "—";
+
+      async function api(path, opts = {}) {
+        const r = await fetch(path, { credentials: "same-origin", ...opts });
+        const data = await r.json().catch(() => ({}));
+        return { ok: r.ok, status: r.status, data };
+      }
+
+      async function load() {
+        const me = await api("/api/me");
+        if (!me.ok) { showLoggedOut(); return; }
+        showLoggedIn(me.data);
+      }
+
+      function showLoggedOut() {
+        $("loginCard").classList.remove("hidden");
+        for (const id of ["profileCard", "statsCard", "keysCard", "logsCard"]) $(id).classList.add("hidden");
+        $("logoutLink").classList.add("hidden");
+      }
+
+      function showLoggedIn(me) {
+        $("loginCard").classList.add("hidden");
+        for (const id of ["profileCard", "statsCard", "keysCard", "logsCard"]) $(id).classList.remove("hidden");
+        $("logoutLink").classList.remove("hidden");
+        $("name").value = me.account;
+        $("email").textContent = me.email ? `Signed in as ${me.email}` : "";
+        renderStats(me.stats);
+        renderKeys(me.keys || []);
+        loadLogs();
+      }
+
+      function renderStats(s) {
+        const stat = (label, val) => `<div class="stat"><b>${val}</b><span>${label}</span></div>`;
+        $("stats").innerHTML = s
+          ? stat("games won", s.wins) + stat("max size", s.maxSize) + stat("games", s.gamesPlayed) +
+            stat("avg size", (s.avgSize || 0).toFixed(0))
+          : `<p class="muted">No completed rounds yet — connect an agent and play a round.</p>`;
+      }
+
+      function renderKeys(keys) {
+        const tb = $("keysTable").querySelector("tbody");
+        if (!keys.length) { tb.innerHTML = `<tr><td colspan="5" class="muted">No keys yet. Create one to connect an agent.</td></tr>`; return; }
+        tb.innerHTML = keys.map((k) =>
+          `<tr><td class="mono">${esc(k.prefix)}</td><td>${esc(k.label || "—")}</td>` +
+          `<td>${fmt(k.createdAt)}</td><td>${fmt(k.lastUsedAt)}</td>` +
+          `<td><button class="danger" data-id="${esc(k.id)}" style="padding:3px 9px">Revoke</button></td></tr>`).join("");
+        tb.querySelectorAll("button[data-id]").forEach((b) =>
+          b.onclick = () => revokeKey(b.getAttribute("data-id")));
+      }
+
+      async function newKey() {
+        const label = prompt("Label for this key (optional):", "") ?? "";
+        const { ok, data } = await api("/api/keys", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }),
+        });
+        if (!ok) { $("keyOut").innerHTML = `<p class="err">${esc(data.error || "Failed")}</p>`; return; }
+        $("keyOut").innerHTML = `<p class="ok">New key — copy it now, it will not be shown again:</p><div class="key">${esc(data.key)}</div>`;
+        refreshKeys();
+      }
+
+      async function revokeKey(id) {
+        if (!confirm("Revoke this key? Agents using it will be disconnected.")) return;
+        await api(`/api/keys?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+        refreshKeys();
+      }
+
+      async function refreshKeys() {
+        const { ok, data } = await api("/api/keys");
+        if (ok) renderKeys(data.keys || []);
+      }
+
+      async function saveName() {
+        const displayName = $("name").value.trim();
+        const { ok, data } = await api("/api/me", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ displayName }),
+        });
+        $("nameOut").innerHTML = ok ? `<p class="ok">Saved.</p>` : `<p class="err">${esc(data.error || "Failed")}</p>`;
+      }
+
+      async function loadLogs() {
+        const { ok, data } = await api("/api/logs?limit=60");
+        if (!ok) { $("logs").innerHTML = `<p class="err">${esc(data.error || "Failed")}</p>`; return; }
+        if (!data.entries.length) { $("logs").innerHTML = `<p class="muted">No decisions logged yet.</p>`; return; }
+        let html = `<p class="muted">${data.entries.length} of ${data.total} decisions (newest first). Full evidence at <a href="/logs.html">the log viewer</a>.</p>`;
+        html += `<table><thead><tr><th>Move</th><th>Round/Tick</th><th>Latency</th><th>When</th></tr></thead><tbody>`;
+        for (const e of data.entries) {
+          html += `<tr class="logrow"><td class="mv">${esc(e.move)}</td><td>R${e.round} · t${e.tick}</td>` +
+            `<td>${e.latencyMs == null ? "—" : e.latencyMs + "ms"}</td><td>${new Date(e.ts).toLocaleTimeString()}</td></tr>`;
+        }
+        $("logs").innerHTML = html + "</tbody></table>";
+      }
+
+      async function delLogs() {
+        if (!confirm("Delete ALL your decision logs? This cannot be undone.")) return;
+        const { ok } = await api("/api/logs", { method: "DELETE" });
+        if (ok) loadLogs();
+      }
+
+      async function logout(e) {
+        e.preventDefault();
+        await api("/auth/logout", { method: "POST" });
+        showLoggedOut();
+      }
+
+      $("newKey").onclick = newKey;
+      $("saveName").onclick = saveName;
+      $("del").onclick = delLogs;
+      $("logoutLink").onclick = logout;
+
+      // If Google isn't configured, the button 503s; hint the user.
+      fetch("/auth/google", { method: "HEAD" }).catch(() => {});
+      load();
+    </script>
+  </body>
+</html>
