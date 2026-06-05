@@ -10,7 +10,22 @@ export interface SpectatorSnake {
   size: number;
   peakSize: number;
   frenzy: boolean;
+  /** Active timed effects (frenzy/ghost/flare/magnet) for the spectator HUD. */
+  effects: string[];
+  /** The snake's standing on THIS round's win condition (zone ticks, waypoints
+   * reached, kills, peak length, current length…), or null when the objective is
+   * plain survival (which has no separate per-snake score). */
+  score: number | null;
   combo: number;
+}
+
+/** Context the arena passes so each snake's live `score` reflects how the round is
+ * actually won, not just its length. */
+export interface SnapshotOpts {
+  /** The round objective ("survive" | "grow" | "kills" | "zone" | "relay" | "bell" | "fasting"). */
+  objective?: string;
+  /** Cut-off kill tally lookup for the round (used by the "kills" objective). */
+  killsOf?: (id: string) => number;
 }
 
 export interface SpectatorFood {
@@ -37,7 +52,7 @@ export function staticMap(game: Game): { obstacles: Cell[] } {
 }
 
 /** Full, un-clipped world snapshot — for the spectator view and replays only. */
-export function fullSnapshot(game: Game): SpectatorFrame {
+export function fullSnapshot(game: Game, opts: SnapshotOpts = {}): SpectatorFrame {
   const food: SpectatorFood[] = [];
   for (const [k, value] of game.food) {
     food.push({ ...decode(k), value });
@@ -46,6 +61,19 @@ export function fullSnapshot(game: Game): SpectatorFrame {
   for (const [k, kind] of game.powerUps) {
     powerUps.push({ ...decode(k), kind });
   }
+  // Mirror the arena's round-ranking metric so the live board scores the round the
+  // way it will actually be won (see endRound's scoreOf).
+  const scoreOf = (s: (typeof game.snakes)[number]): number | null => {
+    switch (opts.objective) {
+      case "zone": return s.zoneTicks;
+      case "relay": return s.waypointIndex;
+      case "kills": return opts.killsOf?.(s.id) ?? 0;
+      case "grow": return s.peakSize;
+      case "bell": return game.sizeOf(s);
+      case "fasting": return game.sizeOf(s);
+      default: return null; // survive: ranked by survival + length, no separate score
+    }
+  };
   return {
     tick: game.tick,
     food,
@@ -59,6 +87,13 @@ export function fullSnapshot(game: Game): SpectatorFrame {
       size: game.sizeOf(s),
       peakSize: s.peakSize,
       frenzy: s.frenzyUntil > game.tick,
+      effects: [
+        s.frenzyUntil > game.tick ? "frenzy" : null,
+        s.ghostUntil > game.tick ? "ghost" : null,
+        s.flareUntil > game.tick ? "flare" : null,
+        s.magnetUntil > game.tick ? "magnet" : null,
+      ].filter((e): e is string => e !== null),
+      score: scoreOf(s),
       combo: s.comboLevel,
     })),
   };

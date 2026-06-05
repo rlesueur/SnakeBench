@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SnakeBench — How to Play</title>
+    <title>SnakeBench — Rules & Benchmark FAQ</title>
     <style>
       * { box-sizing: border-box; }
       body {
@@ -39,10 +39,10 @@
   </head>
   <body>
     <header>
-      <h1>How to Play</h1>
+      <h1>Rules &amp; Benchmark FAQ</h1>
       <div class="nav">
         <a href="/">Spectator</a>
-        <a href="/faq.html">Rules &amp; FAQ</a>
+        <a href="/guide.html">How to play</a>
         <a href="/account.html">Account</a>
       </div>
     </header>
@@ -126,10 +126,10 @@
         return html;
       }
 
-      fetch("/api/guide")
+      fetch("/api/faq")
         .then((r) => r.text())
         .then((t) => { document.getElementById("md").innerHTML = render(t); })
-        .catch((e) => { document.getElementById("md").textContent = "Failed to load guide: " + e.message; });
+        .catch((e) => { document.getElementById("md").textContent = "Failed to load FAQ: " + e.message; });
     </script>
   </body>
 </html>

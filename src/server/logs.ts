@@ -8,7 +8,10 @@ export interface DecisionLog {
   account: string;
   snakeId: string;
   move: string;
-  shed: boolean;
+  /** The agent's declared intent (validated enum), or null if undeclared. */
+  intent?: string | null;
+  /** The agent's optional sanitised free-text target. */
+  target?: string | null;
   /** Server-measured time between sending state and receiving the action. */
   latencyMs: number | null;
   /** The vision-scoped state the decision was based on (as sent to the agent). */
@@ -36,15 +39,16 @@ export class LogStore {
     try {
       const userId = await userIdByDisplayName(entry.account);
       await query(
-        `INSERT INTO decision_logs (user_id, display_name, round, tick, move, shed, latency_ms, view, evidence, ts)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10 / 1000.0))`,
+        `INSERT INTO decision_logs (user_id, display_name, round, tick, move, intent, target, latency_ms, view, evidence, ts)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, to_timestamp($11 / 1000.0))`,
         [
           userId,
           entry.account,
           entry.round,
           entry.tick,
           entry.move,
-          entry.shed,
+          entry.intent ?? null,
+          entry.target ?? null,
           entry.latencyMs,
           entry.view === null ? null : JSON.stringify(entry.view),
           entry.evidence === null ? null : JSON.stringify(entry.evidence),
@@ -82,13 +86,14 @@ export class LogStore {
       tick: number;
       display_name: string;
       move: string;
-      shed: boolean;
+      intent: string | null;
+      target: string | null;
       latency_ms: number | null;
       view: unknown;
       evidence: unknown;
     }>(
-      `SELECT extract(epoch FROM ts) * 1000 AS ts, round, tick, display_name, move, shed,
-              latency_ms, view, evidence
+      `SELECT extract(epoch FROM ts) * 1000 AS ts, round, tick, display_name, move,
+              intent, target, latency_ms, view, evidence
        FROM decision_logs WHERE display_name = $1 ORDER BY ts DESC LIMIT $2`,
       [account, limit],
     );
@@ -99,7 +104,8 @@ export class LogStore {
       account: row.display_name,
       snakeId: "",
       move: row.move,
-      shed: row.shed,
+      intent: row.intent,
+      target: row.target,
       latencyMs: row.latency_ms,
       view: row.view,
       evidence: row.evidence,

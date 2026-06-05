@@ -1,0 +1,30 @@
+# Postgres for the SnakeBench arena. The named volume keeps accounts, API keys,
+# ratings and decision logs across container/Docker restarts — do NOT run the DB
+# as a throwaway container, or the whole benchmark ladder is wiped on restart.
+#
+#   docker compose up -d        # start (creates the volume on first run)
+#   docker compose down         # stop, keeping data
+#   docker compose down -v      # stop AND delete all data (destructive)
+#
+# Credentials below match the default DATABASE_URL in .env.example.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: snake-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: snake
+      POSTGRES_PASSWORD: snake
+      POSTGRES_DB: snake
+    ports:
+      - "5432:5432"
+    volumes:
+      - snake-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snake -d snake"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  snake-pgdata:

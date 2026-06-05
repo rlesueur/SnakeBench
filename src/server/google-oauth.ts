@@ -14,8 +14,23 @@ export interface GoogleProfile {
   name: string;
 }
 
+/** A value is a placeholder if it is empty or one of the obvious dev stand-ins
+ * shipped in .env / .env.example. Treating these as "not configured" means the
+ * server reports Google sign-in as unavailable (a clean 503) instead of sending
+ * the user to Google with a bad client, which fails with a confusing
+ * "OAuth client was not found / 401: invalid_client" page. */
+function isPlaceholder(value: string | undefined): boolean {
+  if (!value) return true;
+  const v = value.trim().toLowerCase();
+  return v === "" || v.startsWith("dummy") || v.startsWith("your-") || v.startsWith("change");
+}
+
 export function isConfigured(): boolean {
-  return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.OAUTH_REDIRECT_BASE);
+  return (
+    !isPlaceholder(process.env.GOOGLE_CLIENT_ID) &&
+    !isPlaceholder(process.env.GOOGLE_CLIENT_SECRET) &&
+    Boolean(process.env.OAUTH_REDIRECT_BASE)
+  );
 }
 
 export function redirectUri(): string {
@@ -64,9 +79,12 @@ export async function fetchProfile(accessToken: string): Promise<GoogleProfile> 
     throw new Error(`Google userinfo failed: ${res.status} ${await res.text()}`);
   }
   const json = (await res.json()) as { sub: string; email?: string; name?: string; email_verified?: boolean };
+  // Only treat the email as usable when Google asserts it is verified;
+  // unverified emails could be attacker-controlled and must not be trusted.
+  const verifiedEmail = json.email && json.email_verified !== false ? json.email : null;
   return {
     sub: json.sub,
-    email: json.email ?? null,
-    name: json.name || (json.email ? json.email.split("@")[0]! : "player"),
+    email: verifiedEmail,
+    name: json.name || (verifiedEmail ? verifiedEmail.split("@")[0]! : "player"),
   };
 }

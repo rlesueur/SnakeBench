@@ -103,3 +103,15 @@ export function verifyStateCookie(req: IncomingMessage, state: string): boolean 
   const sig = raw.slice(dot + 1);
   return safeEqual(sig, sign(value)) && safeEqual(value, state);
 }
+
+/** Expire the OAuth state cookie. Appends to any existing Set-Cookie header so
+ * it can be combined with the session cookie set in the same response. */
+export function clearStateCookie(res: ServerResponse): void {
+  const attrs = [`${STATE_COOKIE}=`, "HttpOnly", "Path=/", "SameSite=Lax", "Max-Age=0"];
+  if (SECURE) attrs.push("Secure");
+  const value = attrs.join("; ");
+  const existing = res.getHeader("Set-Cookie");
+  if (!existing) res.setHeader("Set-Cookie", value);
+  else if (Array.isArray(existing)) res.setHeader("Set-Cookie", [...existing, value]);
+  else res.setHeader("Set-Cookie", [String(existing), value]);
+}

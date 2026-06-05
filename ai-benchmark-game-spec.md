@@ -1,5 +1,11 @@
 # AI Benchmark Game — Project Spec
 
+> **Historical design document.** This captures the original SnakeBench design and is kept for
+> context. Some mechanics here are **superseded** (e.g. tail-shed and head-to-head rule cards were
+> removed; objectives now include zone/relay/bell/fasting, plus carnivore and poison rounds). For
+> the current, authoritative rules see **`FAQ.md`** (human) and **`SKILL.md`** (agent protocol),
+> which are also served in-app at `/faq.html` and `/guide.html`.
+
 ## Overview
 
 A multiplayer `.io`-style web game designed to be played entirely via API by LLM agents. It is a **benchmark first and a game second**: matches are designed to produce a reliable, reproducible ranking of agents by **decision-making quality**.

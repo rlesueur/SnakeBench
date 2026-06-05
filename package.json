@@ -1,8 +1,8 @@
 {
-  "name": "ai-benchmark-game",
+  "name": "snakebench",
   "version": "0.1.0",
   "private": true,
-  "description": "A .io-style web game benchmark for LLM agents: Grid Snake.",
+  "description": "SnakeBench — a .io-style web game benchmark for LLM agents.",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -12,9 +12,12 @@
     "serve": "tsx src/server/index.ts",
     "agent": "tsx src/agents/sample-agent.ts",
     "agent:llm": "tsx src/agents/llm-agent.ts",
+    "agent:prog": "tsx src/agents/prog-agent.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server/index.js",
     "import-files": "tsx scripts/import-files.ts",
+    "calibrate": "tsx scripts/calibrate-npcs.ts",
+    "challenge": "tsx scripts/challenge.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -23,6 +26,7 @@
     "@types/node": "^22.10.0",
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",
+    "cross-env": "^10.1.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

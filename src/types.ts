@@ -22,7 +22,10 @@ export const OPPOSITE: Record<Direction, Direction> = {
   right: "left",
 };
 
-export type PowerKind = "frenzy";
+export type PowerKind = "frenzy" | "ghost" | "flare" | "magnet" | "wall";
+
+/** All collectible power-up kinds (excludes nothing — "wall" is an instant drop). */
+export const POWER_KINDS: readonly PowerKind[] = ["frenzy", "ghost", "flare", "magnet", "wall"];
 
 export interface Snake {
   id: string;
@@ -40,6 +43,16 @@ export interface Snake {
   lastAteTick: number;
   /** Frenzy (double food) active while this tick index is < frenzyUntil. */
   frenzyUntil: number;
+  /** Ghost (pass through snake bodies) active while tick < ghostUntil. */
+  ghostUntil: number;
+  /** Vision flare (boosted sight radius) active while tick < flareUntil. */
+  flareUntil: number;
+  /** Magnet (pull nearby food) active while tick < magnetUntil. */
+  magnetUntil: number;
+  /** Ticks spent with the head inside the round's scoring zone ("zone" objective). */
+  zoneTicks: number;
+  /** Index of the next relay waypoint this snake is heading for ("relay" objective). */
+  waypointIndex: number;
   /** Largest length reached so far — the match metric. */
   peakSize: number;
   /** Tick at which the snake died, or null if alive. */

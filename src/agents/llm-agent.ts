@@ -1,84 +1,65 @@
-import { WebSocket } from "ws";
+import { runAgent, type Decision, type Rules, type State } from "./core.js";
 
 /**
- * LLM agent. Connects to the arena, and each tick asks a local llama.cpp server
- * (OpenAI-compatible API) which way to move, passing the vision-scoped state
- * straight into the prompt.
+ * LLM brain — a THIN client. Each tick it relays the SERVER's own rule description
+ * plus the raw local observation into the prompt and asks a local llama.cpp server
+ * (OpenAI-compatible API) for a move.
+ *
+ * It does NO tactical analysis and embeds NO game strategy of its own: what each
+ * card / objective / modifier means comes from the server's brief, and working out
+ * which move is safe or on-objective is left entirely to the model. That is the
+ * whole point of the benchmark — we measure the MODEL's reasoning, not the client's
+ * heuristics, so the client must never pre-chew the decision.
  *
  * Requires a running llama-server, e.g.:
  *   llama-server.exe -m Qwen3.6-35B-A3B-UD-Q6_K.gguf --port 8081 -ngl 999 --jinja
  *
  * Usage: npm run agent:llm -- [key] [arenaUrl] [llamaUrl]
  */
-type Direction = "up" | "down" | "left" | "right";
-type Cell = { x: number; y: number };
-
-interface SnakeView {
-  head: Cell;
-  body: Cell[];
-}
-interface Food {
-  x: number;
-  y: number;
-  value: number;
-}
-interface State {
-  tick: number;
-  action_deadline_ms: number;
-  world: { width: number; height: number };
-  you: { heading: Direction; head: Cell; length: number; body: Cell[] };
-  food: Food[];
-  obstacles: Cell[];
-  power_ups: Array<{ x: number; y: number; kind: string }>;
-  snakes: SnakeView[];
-}
-
-const DELTA: Record<Direction, Cell> = {
-  up: { x: 0, y: -1 },
-  down: { x: 0, y: 1 },
-  left: { x: -1, y: 0 },
-  right: { x: 1, y: 0 },
-};
-const OPPOSITE: Record<Direction, Direction> = {
-  up: "down",
-  down: "up",
-  left: "right",
-  right: "left",
-};
-const DIRECTIONS: Direction[] = ["up", "down", "left", "right"];
-
-const SYSTEM_PROMPT = [
-  "You play a grid snake game. You see a local map centred on your head '@'.",
-  "Legend: @ your head, o your body, X enemy snake, . empty, # wall or obstacle (out-of-bounds and deadly).",
-  "Food: * = +1 growth, $ = +3, & = +6 (rarer, more valuable). F = frenzy power-up (briefly doubles food).",
-  "Moving onto #, o, or X KILLS you. Eat food to grow longer.",
-  "Your goal is to survive and become the longest snake. Prefer higher-value food when safe.",
-  "Reply with ONLY one word: up, down, left, or right.",
-].join(" ");
 
 const LLAMA_URL = process.argv[4] ?? process.env.LLAMA_URL ?? "http://localhost:8081";
-const MAP_RADIUS = 6;
+const MODEL_NAME = process.env.LLAMA_MODEL ?? "qwen3.6-local";
+const MAP_RADIUS_CAP = 30; // safety cap on the rendered window
 
+/** Single-letter map glyph per power-up kind (the agent's own rendering choice). */
+const POWER_GLYPH: Record<string, string> = {
+  frenzy: "F", ghost: "G", flare: "L", magnet: "M", wall: "K",
+};
+
+const SYSTEM_PROMPT = [
+  "You are an agent playing a grid-based snake game over an API.",
+  "Each turn you receive the rules in force for the current round and a local view of the board centred on your snake's head, and you choose a single move.",
+  "Map symbols: @ your head, o your own body, X another snake, # wall or obstacle, . empty cell, ? a cell outside your view. Food shows its value: * is 1, $ is 3, & is 6. The letters F, G, L, M, K are power-ups.",
+  "Fixed rules of the game: you move one cell per turn in the direction you choose and may not immediately reverse into your own neck; moving into a wall, an obstacle, or any snake (including yourself) ends your run. The round's rules below may add their own win condition and twists.",
+  "Read the round's rules and the board, then decide the move that best serves the win condition — that is your job to work out.",
+  "Reply with exactly: '<direction> <intent>' where direction is up, down, left or right and intent is one of feeding, hunting, evading, escaping, roaming. You may add a few words naming a target after the intent.",
+].join(" ");
+
+/** Render the transmitted vision as an ASCII map centred on the head. This is just
+ * a faithful drawing of the observation the server sent — no analysis. */
 function buildMap(state: State): string {
   const { head } = state.you;
+  const radius = Math.min(state.vision?.radius ?? 12, MAP_RADIUS_CAP);
   const occ = new Map<string, string>();
   for (const o of state.obstacles ?? []) occ.set(`${o.x},${o.y}`, "#");
   for (const c of state.you.body.slice(1)) occ.set(`${c.x},${c.y}`, "o");
   for (const s of state.snakes) for (const c of s.body) occ.set(`${c.x},${c.y}`, "X");
-  for (const p of state.power_ups ?? []) occ.set(`${p.x},${p.y}`, "F");
+  for (const p of state.power_ups ?? []) occ.set(`${p.x},${p.y}`, POWER_GLYPH[p.kind] ?? "P");
   for (const f of state.food) {
     occ.set(`${f.x},${f.y}`, f.value >= 6 ? "&" : f.value >= 3 ? "$" : "*");
   }
   occ.set(`${head.x},${head.y}`, "@");
 
   const rows: string[] = [];
-  for (let dy = -MAP_RADIUS; dy <= MAP_RADIUS; dy++) {
+  for (let dy = -radius; dy <= radius; dy++) {
     let row = "";
-    for (let dx = -MAP_RADIUS; dx <= MAP_RADIUS; dx++) {
+    for (let dx = -radius; dx <= radius; dx++) {
       const x = head.x + dx;
       const y = head.y + dy;
       if (x < 0 || x >= state.world.width || y < 0 || y >= state.world.height) {
         row += "#";
+      } else if (Math.abs(dx) + Math.abs(dy) > radius) {
+        row += "?"; // outside the transmitted vision diamond
       } else {
         row += occ.get(`${x},${y}`) ?? ".";
       }
@@ -88,53 +69,67 @@ function buildMap(state: State): string {
   return rows.join("\n");
 }
 
-function describeMoves(state: State): string {
-  const { head, heading, body } = state.you;
-  const banned = body.length > 1 ? OPPOSITE[heading] : null;
-  const blocked = new Set<string>();
-  for (const c of body) blocked.add(`${c.x},${c.y}`);
-  for (const s of state.snakes) for (const c of s.body) blocked.add(`${c.x},${c.y}`);
-  for (const o of state.obstacles ?? []) blocked.add(`${o.x},${o.y}`);
+/** Build the per-tick prompt: the server's rules for this round, then the raw
+ * observation. No move analysis, no food ranking, no objective coaching — the
+ * model is given the same information a human reading the rules would have. */
+function buildPrompt(state: State, rules: Rules | null): string {
+  const you = state.you;
+  const lines: string[] = [];
 
-  const lines = DIRECTIONS.map((d) => {
-    if (d === banned) return `${d}: ILLEGAL (would reverse)`;
-    const n = { x: head.x + DELTA[d].x, y: head.y + DELTA[d].y };
-    const oob = n.x < 0 || n.x >= state.world.width || n.y < 0 || n.y >= state.world.height;
-    if (oob || blocked.has(`${n.x},${n.y}`)) return `${d}: DEADLY`;
-    return `${d}: safe`;
-  });
-
-  let foodHint = "No food in sight.";
-  if (state.food.length) {
-    let best = state.food[0]!;
-    let bestD = Infinity;
-    for (const f of state.food) {
-      const dist = Math.abs(f.x - head.x) + Math.abs(f.y - head.y);
-      if (dist < bestD) {
-        bestD = dist;
-        best = f;
-      }
+  if (rules) {
+    lines.push(`Rules this round — "${rules.name}": ${rules.brief}`);
+    lines.push(`Win condition (objective): ${rules.objective}.`);
+    const econ = [`food density: ${rules.food}`];
+    if (rules.food_grows === false) econ.push("eating food does not make you grow this round");
+    if (rules.poison_value != null) econ.push(`poison_value: ${rules.poison_value}`);
+    lines.push(`${econ.join("; ")}.`);
+    if (rules.zone) {
+      lines.push(
+        `zone: x ${rules.zone.x}..${rules.zone.x + rules.zone.w - 1}, y ${rules.zone.y}..${rules.zone.y + rules.zone.h - 1}.`,
+      );
     }
-    const dx = best.x - head.x;
-    const dy = best.y - head.y;
-    const hor = dx > 0 ? "right" : dx < 0 ? "left" : "";
-    const ver = dy > 0 ? "down" : dy < 0 ? "up" : "";
-    foodHint = `Nearest food is ${[ver, hor].filter(Boolean).join(" and ")} (${bestD} steps).`;
+    if (rules.waypoints?.length) {
+      lines.push(`waypoints (in order): ${rules.waypoints.map((w) => `(${w.x},${w.y})`).join(" -> ")}.`);
+    }
+    if (rules.bell_tick != null) lines.push(`bell_tick: ${rules.bell_tick}.`);
+    if (rules.modifiers?.length) {
+      lines.push("Twists in play:");
+      for (const m of rules.modifiers) lines.push(`- ${m.brief}`);
+    }
+    lines.push("");
   }
-  return `${lines.join("\n")}\n${foodHint}`;
+
+  lines.push(
+    `Board: ${state.world.width} wide x ${state.world.height} tall; origin (0,0) is top-left, x grows right (east), y grows down (south). It is tick ${state.tick}.`,
+  );
+  lines.push("Map (you are @ at the centre, north is up):");
+  lines.push(buildMap(state));
+  lines.push("");
+
+  const status = [
+    `position (${you.head.x}, ${you.head.y})`,
+    `length ${you.length}`,
+    `heading ${you.heading}`,
+  ];
+  if (you.zone_ticks != null) status.push(`zone_ticks ${you.zone_ticks}`);
+  if (you.waypoints_done != null) status.push(`waypoints_done ${you.waypoints_done}`);
+  if (you.next_waypoint) status.push(`next_waypoint (${you.next_waypoint.x}, ${you.next_waypoint.y})`);
+  const effects: string[] = [];
+  if (you.combo && you.combo > 1) effects.push(`combo x${you.combo}`);
+  if (you.frenzy_ticks_left) effects.push(`frenzy ${you.frenzy_ticks_left}`);
+  if (you.ghost_ticks_left) effects.push(`ghost ${you.ghost_ticks_left}`);
+  if (you.flare_ticks_left) effects.push(`flare ${you.flare_ticks_left}`);
+  if (you.magnet_ticks_left) effects.push(`magnet ${you.magnet_ticks_left}`);
+  if (effects.length) status.push(`active power-ups: ${effects.join(", ")}`);
+  lines.push(`You: ${status.join(", ")}.`);
+  lines.push("");
+  lines.push("Your move? Reply '<direction> <intent>' (intent: feeding, hunting, evading, escaping, roaming), optionally a short target.");
+
+  return lines.join("\n");
 }
 
-interface ModelDecision {
-  move: Direction | null;
-  prompt: string;
-  raw: string;
-}
-
-async function askModel(state: State, signal: AbortSignal): Promise<ModelDecision> {
-  const user =
-    `Map (you are @ in the centre):\n${buildMap(state)}\n\n` +
-    `Move options:\n${describeMoves(state)}\n\n` +
-    `Choose a safe move towards food. Answer with one word.`;
+async function askModel(state: State, rules: Rules | null, signal: AbortSignal): Promise<Decision> {
+  const user = buildPrompt(state, rules);
 
   const res = await fetch(`${LLAMA_URL}/v1/chat/completions`, {
     method: "POST",
@@ -143,7 +138,6 @@ async function askModel(state: State, signal: AbortSignal): Promise<ModelDecisio
     body: JSON.stringify({
       model: "local",
       temperature: 0,
-      max_tokens: 4,
       chat_template_kwargs: { enable_thinking: false },
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
@@ -154,78 +148,21 @@ async function askModel(state: State, signal: AbortSignal): Promise<ModelDecisio
   if (!res.ok) throw new Error(`llama-server HTTP ${res.status}`);
   const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
   const raw = data.choices?.[0]?.message?.content ?? "";
-  const m = raw.toLowerCase().match(/\b(up|down|left|right)\b/);
-  return { move: (m?.[1] as Direction) ?? null, prompt: user, raw };
+  const lower = raw.toLowerCase();
+  // Take the FIRST direction word (the model answers "<direction> <intent>").
+  const move = (lower.match(/\b(up|down|left|right)\b/)?.[1] as Decision["move"]) ?? null;
+  const intent = (lower.match(/\b(feeding|hunting|evading|escaping|roaming)\b/)?.[1] as Decision["intent"]) ?? null;
+  // Anything after the intent word is treated as a short free-text target.
+  let target: string | null = null;
+  if (intent) {
+    const after = raw.slice(lower.indexOf(intent) + intent.length).trim();
+    if (after) target = after.replace(/\s+/g, " ").slice(0, 24);
+  }
+  return { move, intent, target, log: { system: SYSTEM_PROMPT, prompt: user, response: raw } };
 }
 
-function main(): void {
-  const key = process.argv[2] ?? process.env.AGENT_KEY ?? "local-dev-key";
-  const arenaUrl = process.argv[3] ?? process.env.ARENA_URL ?? "ws://localhost:8080";
-  const ws = new WebSocket(`${arenaUrl}/agent?key=${encodeURIComponent(key)}`);
-
-  let inFlight: AbortController | null = null;
-
-  ws.on("open", () => console.log(`Connected to ${arenaUrl}; model at ${LLAMA_URL}`));
-  ws.on("error", (err) => console.error("WS error:", err.message));
-  ws.on("close", () => {
-    console.log("Disconnected.");
-    process.exit(0);
-  });
-
-  ws.on("message", async (raw) => {
-    const msg = JSON.parse(raw.toString());
-    if (msg.type === "round_start") {
-      console.log(`Round ${msg.round} started.`);
-      return;
-    }
-    if (msg.type === "dead") {
-      console.log(`Died at tick ${msg.tick}, peak size ${msg.peak_size}.`);
-      return;
-    }
-    if (msg.type === "round_end") {
-      const top = msg.standings[0];
-      console.log(`Round ${msg.round} ended. Winner: ${top?.display_name} (peak ${top?.peak_size}).`);
-      return;
-    }
-    if (msg.type !== "state") return;
-
-    const state = msg.state as State;
-
-    // Cancel any previous (now stale) request and bound this one by the deadline.
-    inFlight?.abort();
-    const ac = new AbortController();
-    inFlight = ac;
-    const budget = Math.max(500, state.action_deadline_ms - Date.now() - 100);
-    const timer = setTimeout(() => ac.abort(), budget);
-
-    const started = Date.now();
-    try {
-      const decision = await askModel(state, ac.signal);
-      clearTimeout(timer);
-      const move = decision.move;
-      if (move && ws.readyState === WebSocket.OPEN) {
-        const latencyMs = Date.now() - started;
-        ws.send(
-          JSON.stringify({
-            type: "action",
-            tick: state.tick,
-            move,
-            log: {
-              model: "qwen3.6-local",
-              latencyMs,
-              system: SYSTEM_PROMPT,
-              prompt: decision.prompt,
-              response: decision.raw,
-            },
-          }),
-        );
-        console.log(`tick ${state.tick}: ${move} (${latencyMs}ms, len ${state.you.length})`);
-      }
-    } catch (err) {
-      clearTimeout(timer);
-      if (!ac.signal.aborted) console.error("model error:", (err as Error).message);
-    }
-  });
-}
-
-main();
+runAgent({
+  name: MODEL_NAME,
+  banner: `brain=llm, model at ${LLAMA_URL}`,
+  decide: (state, rules, signal) => askModel(state, rules, signal),
+});

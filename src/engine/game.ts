@@ -4,6 +4,7 @@ import {
   type Cell,
   type Direction,
   DELTA,
+  OPPOSITE,
   type PowerKind,
   type Snake,
   cellKey,
@@ -22,19 +23,47 @@ interface PlannedMove {
   newHead: Cell;
   newBody: Cell[];
   eaten: number;
+  /** Raw value of food on the entered cell, before the foodGrows gate — used to
+   * detect poison (lethal high-value food). */
+  rawFood: number;
   newPending: number;
   comboLevel: number;
   ate: boolean;
 }
 
+/** Why a snake died this tick (for the spectator kill feed). */
+export type DeathCause = "wall" | "obstacle" | "body" | "head2head" | "poison";
+
+/** A notable event produced by a single `step`, for spectators/commentary. */
+export type GameEvent =
+  | { kind: "death"; id: string; displayName: string; isNpc: boolean; cause: DeathCause; tick: number }
+  | {
+      kind: "kill";
+      id: string;
+      displayName: string;
+      isNpc: boolean;
+      victim: string;
+      victimName: string;
+      amount: number;
+      tick: number;
+    }
+  | { kind: "powerup"; id: string; displayName: string; isNpc: boolean; power: PowerKind; tick: number }
+  | { kind: "wall"; id: string; displayName: string; isNpc: boolean; cells: Cell[]; tick: number }
+  | { kind: "waypoint"; id: string; displayName: string; isNpc: boolean; index: number; cell: Cell; tick: number };
+
 interface Resolution {
   dead: Set<string>;
-  /** Growth granted to head-to-head winners by absorbing the loser. */
+  /** Cause of death per dead snake. */
+  causes: Map<string, DeathCause>;
+  /** Growth granted to kill winners by absorbing the loser. */
   absorb: Map<string, number>;
+  /** Kills this tick: who killed whom and how much they absorbed. A single snake
+   * can register several kills in one tick (e.g. two rivals cut off at once). */
+  kills: Array<{ winner: string; victim: string; amount: number }>;
 }
 
 /**
- * The authoritative Grid Snake simulation. Pure and deterministic: given the
+ * The authoritative SnakeBench simulation. Pure and deterministic: given the
  * same seed and the same ordered actions, `step` always produces the same
  * result. No I/O, no wall-clock, no Math.random.
  */
@@ -102,32 +131,86 @@ export class Game {
 
   private placeSnakes(specs: SnakeSpec[]): void {
     const { startingLength, width, height } = this.config;
-    const cols = Math.max(1, Math.ceil(Math.sqrt(specs.length)));
-    const rows = Math.max(1, Math.ceil(specs.length / cols));
-    specs.forEach((spec, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const headX = Math.max(startingLength, Math.round(((col + 1) * width) / (cols + 1)));
-      const y = Math.round(((row + 1) * height) / (rows + 1));
+    const headings: Direction[] = ["up", "down", "left", "right"];
+    const buffer = 2; // keep spawns off the walls
+    const gap = 3; // preferred spacing between spawns
+    const occupied = new Set<string>(); // actual body cells (no overlap allowed)
+    const spaced = new Set<string>(); // body cells + gap (preferred spacing)
+
+    // Lay a body of `startingLength` with its head at (hx,hy), trailing in the
+    // direction opposite `heading` (same convention as movement).
+    const bodyFor = (hx: number, hy: number, heading: Direction): Cell[] => {
+      const d = DELTA[heading];
       const body: Cell[] = [];
       for (let seg = 0; seg < startingLength; seg++) {
-        body.push({ x: headX - seg, y });
+        body.push({ x: hx - d.x * seg, y: hy - d.y * seg });
+      }
+      return body;
+    };
+    const inField = (c: Cell): boolean =>
+      c.x >= buffer && c.x < width - buffer && c.y >= buffer && c.y < height - buffer;
+    const fits = (body: Cell[], blocked: Set<string>): boolean =>
+      body.every((c) => inField(c) && !blocked.has(cellKey(c)));
+
+    const commit = (spec: SnakeSpec, body: Cell[], heading: Direction): void => {
+      for (const c of body) {
+        occupied.add(cellKey(c));
+        for (let dy = -gap; dy <= gap; dy++) {
+          for (let dx = -gap; dx <= gap; dx++) spaced.add(key(c.x + dx, c.y + dy));
+        }
       }
       this.snakes.push({
         id: spec.id,
         displayName: spec.displayName,
         isNpc: spec.isNpc,
         alive: true,
-        heading: "right",
+        heading,
         body,
         pendingGrowth: 0,
         comboLevel: 0,
         lastAteTick: -999,
         frenzyUntil: 0,
+        ghostUntil: 0,
+        flareUntil: 0,
+        magnetUntil: 0,
+        zoneTicks: 0,
+        waypointIndex: 0,
         peakSize: startingLength,
         diedAtTick: null,
       });
-    });
+    };
+
+    const xSpan = Math.max(1, width - 2 * buffer);
+    const ySpan = Math.max(1, height - 2 * buffer);
+    for (const spec of specs) {
+      let placed = false;
+
+      // 1) Randomised, well-spaced placement (seeded — deterministic per round).
+      for (let attempt = 0; attempt < 300 && !placed; attempt++) {
+        const heading = headings[this.rng.int(4)]!;
+        const body = bodyFor(buffer + this.rng.int(xSpan), buffer + this.rng.int(ySpan), heading);
+        if (fits(body, spaced)) {
+          commit(spec, body, heading);
+          placed = true;
+        }
+      }
+
+      // 2) Guaranteed overlap-free scan if the world is crowded.
+      for (let h = 0; h < headings.length && !placed; h++) {
+        const heading = headings[(this.rng.int(4) + h) % headings.length]!;
+        for (let hy = buffer; hy < height - buffer && !placed; hy++) {
+          for (let hx = buffer; hx < width - buffer && !placed; hx++) {
+            const body = bodyFor(hx, hy, heading);
+            if (fits(body, occupied)) {
+              commit(spec, body, heading);
+              placed = true;
+            }
+          }
+        }
+      }
+
+      if (!placed) throw new Error("Cannot place snake: play area too small for the roster.");
+    }
   }
 
   private placeObstacles(): void {
@@ -171,11 +254,9 @@ export class Game {
 
   // --- the tick ------------------------------------------------------------
 
-  /**
-   * Advance one tick. `moves` gives each snake's chosen direction; snakes in
-   * `sheds` also drop tail segments this tick.
-   */
-  step(moves: Map<string, Direction>, sheds: Set<string> = new Set()): void {
+  /** Advance one tick. `moves` gives each snake's chosen direction. */
+  step(moves: Map<string, Direction>): GameEvent[] {
+    const events: GameEvent[] = [];
     const planned: PlannedMove[] = [];
 
     for (const snake of this.snakes) {
@@ -188,7 +269,10 @@ export class Game {
         newHead = this.headFrom(snake, heading);
       }
 
-      let eaten = this.food.get(cellKey(newHead)) ?? 0;
+      const rawFood = this.food.get(cellKey(newHead)) ?? 0;
+      // On "carnivore" rounds, food is still consumed (cleared) but yields no
+      // growth — the only way to grow is by cutting rivals off.
+      let eaten = this.config.foodGrows ? rawFood : 0;
       const frenzy = snake.frenzyUntil > this.tick;
       if (eaten > 0 && frenzy) eaten *= 2;
 
@@ -210,10 +294,24 @@ export class Game {
       const newBody = [newHead, ...snake.body.map((c) => ({ ...c }))];
       if (!keepTail) newBody.pop();
 
-      planned.push({ snake, heading, newHead, newBody, eaten, newPending, comboLevel, ate });
+      planned.push({ snake, heading, newHead, newBody, eaten, rawFood, newPending, comboLevel, ate });
     }
 
-    const { dead, absorb } = this.resolveCollisions(planned);
+    const { dead, causes, absorb, kills } = this.resolveCollisions(planned);
+
+    // Poison rounds: eating food at/above the poison threshold is lethal. Applied
+    // after collisions so a snake already dead this tick isn't double-counted.
+    if (this.config.poisonValue != null) {
+      const threshold = this.config.poisonValue;
+      for (const p of planned) {
+        if (dead.has(p.snake.id)) continue;
+        if (p.rawFood >= threshold) {
+          dead.add(p.snake.id);
+          causes.set(p.snake.id, "poison");
+          this.food.delete(cellKey(p.newHead));
+        }
+      }
+    }
 
     for (const p of planned) {
       if (dead.has(p.snake.id)) continue;
@@ -224,22 +322,55 @@ export class Game {
       if (p.ate) {
         s.comboLevel = p.comboLevel;
         s.lastAteTick = this.tick;
-        this.food.delete(cellKey(p.newHead));
       }
-      this.collectPowerUp(s, p.newHead);
+      // Clear any food on the entered cell even if it gave no growth (carnivore).
+      this.food.delete(cellKey(p.newHead));
+      events.push(...this.collectPowerUp(s, p.newHead));
     }
 
     this.killSnakes(planned, dead);
-    this.applySheds(sheds, dead);
+    this.applyFamine(dead);
+    this.applyMagnets();
+    events.push(...this.applyObjectives(dead));
 
     for (const p of planned) {
       if (dead.has(p.snake.id)) continue;
       p.snake.peakSize = Math.max(p.snake.peakSize, p.snake.body.length);
     }
 
+    // Emit events after state has settled, so names/flags are accurate.
+    for (const id of dead) {
+      const s = this.snakeById(id);
+      if (!s) continue;
+      events.push({
+        kind: "death",
+        id,
+        displayName: s.displayName,
+        isNpc: s.isNpc,
+        cause: causes.get(id) ?? "body",
+        tick: this.tick,
+      });
+    }
+    for (const { winner, victim, amount } of kills) {
+      const w = this.snakeById(winner);
+      const v = this.snakeById(victim);
+      if (!w) continue;
+      events.push({
+        kind: "kill",
+        id: winner,
+        displayName: w.displayName,
+        isNpc: w.isNpc,
+        victim,
+        victimName: v?.displayName ?? victim,
+        amount,
+        tick: this.tick,
+      });
+    }
+
     this.replenishFood();
     this.replenishPowerUps();
     this.tick += 1;
+    return events;
   }
 
   private headFrom(snake: Snake, heading: Direction): Cell {
@@ -250,12 +381,26 @@ export class Game {
 
   private resolveCollisions(planned: PlannedMove[]): Resolution {
     const dead = new Set<string>();
+    const causes = new Map<string, DeathCause>();
     const absorb = new Map<string, number>();
+    const kills: Array<{ winner: string; victim: string; amount: number }> = [];
+    const kill = (id: string, cause: DeathCause): void => {
+      dead.add(id);
+      causes.set(id, cause);
+    };
+    // Record a cut-off / duel kill and (optionally) grant the killer growth.
+    const credit = (winner: string, victim: string, victimLen: number, frac: number): void => {
+      const amount = Math.floor(victimLen * frac);
+      if (amount > 0) absorb.set(winner, (absorb.get(winner) ?? 0) + amount);
+      kills.push({ winner, victim, amount });
+    };
 
-    const bodyCells = new Set<string>();
+    // Map each occupied body cell (everything behind a head) to its owner, so a
+    // snake that runs into it can be attributed as that owner's kill (a "cut-off").
+    const bodyOwner = new Map<string, string>();
     for (const p of planned) {
       for (let i = 1; i < p.newBody.length; i++) {
-        bodyCells.add(cellKey(p.newBody[i]!));
+        bodyOwner.set(cellKey(p.newBody[i]!), p.snake.id);
       }
     }
 
@@ -267,32 +412,55 @@ export class Game {
 
     for (const p of planned) {
       const k = cellKey(p.newHead);
-      if (!this.inBounds(p.newHead) || this.obstacles.has(k)) {
-        dead.add(p.snake.id);
+      if (!this.inBounds(p.newHead)) {
+        kill(p.snake.id, "wall");
         continue;
       }
-      if (bodyCells.has(k)) {
-        dead.add(p.snake.id);
+      if (this.obstacles.has(k)) {
+        kill(p.snake.id, "obstacle");
         continue;
+      }
+      const owner = bodyOwner.get(k);
+      if (owner) {
+        // Ghost lets a snake pass through bodies (its own and others') without
+        // dying — walls and obstacles (handled above) still kill.
+        if (p.snake.ghostUntil > this.tick) {
+          // pass through: no death, no kill credit
+        } else {
+          kill(p.snake.id, "body");
+          // Running into ANOTHER snake's body is a cut-off kill for that snake.
+          // Running into your own body is just self-elimination (no credit).
+          if (owner !== p.snake.id) {
+            credit(owner, p.snake.id, p.newBody.length, this.config.cutoffAbsorbFraction);
+          }
+          continue;
+        }
       }
       const group = byHead.get(k)!;
       if (group.length > 1) {
-        const maxLen = Math.max(...group.map((g) => g.newBody.length));
-        const winners = group.filter((g) => g.newBody.length === maxLen);
+        const mode = this.config.headToHead;
+        if (mode === "all_die") {
+          // No winners: every snake meeting head-on here dies.
+          kill(p.snake.id, "head2head");
+          continue;
+        }
+        const lens = group.map((g) => g.newBody.length);
+        const target = mode === "shortest" ? Math.min(...lens) : Math.max(...lens);
+        const winners = group.filter((g) => g.newBody.length === target);
         const isSoleWinner = winners.length === 1 && winners[0]!.snake.id === p.snake.id;
         if (!isSoleWinner) {
-          dead.add(p.snake.id);
+          kill(p.snake.id, "head2head");
         } else {
           // Sole winner absorbs a fraction of the longest loser.
-          const loserLen = Math.max(
-            ...group.filter((g) => g.snake.id !== p.snake.id).map((g) => g.newBody.length),
-          );
-          absorb.set(p.snake.id, Math.floor(loserLen * this.config.absorbFraction));
+          const losers = group.filter((g) => g.snake.id !== p.snake.id);
+          const loserLen = Math.max(...losers.map((g) => g.newBody.length));
+          const victim = losers.find((g) => g.newBody.length === loserLen)!.snake.id;
+          credit(p.snake.id, victim, loserLen, this.config.absorbFraction);
         }
       }
     }
 
-    return { dead, absorb };
+    return { dead, causes, absorb, kills };
   }
 
   private killSnakes(planned: PlannedMove[], dead: Set<string>): void {
@@ -309,28 +477,154 @@ export class Game {
     }
   }
 
-  private applySheds(sheds: Set<string>, dead: Set<string>): void {
-    const { shedSegments, shedMinLength } = this.config;
-    for (const id of sheds) {
-      const snake = this.snakeById(id);
-      if (!snake || !snake.alive || dead.has(id)) continue;
-      let shed = 0;
-      while (shed < shedSegments && snake.body.length > shedMinLength) {
-        const tail = snake.body.pop()!;
-        if (this.inBounds(tail) && !this.obstacles.has(cellKey(tail))) {
-          this.food.set(cellKey(tail), 1);
-        }
-        shed += 1;
-      }
+  /**
+   * Famine ("length tax"): on every `lengthTaxTicks`-th tick, any snake that has
+   * not eaten within that window withers by one tail segment (down to its
+   * starting length). The lost segment does NOT drop as food — it is gone. Forces
+   * agents to keep feeding instead of camping defensively.
+   */
+  private applyFamine(dead: Set<string>): void {
+    const period = this.config.lengthTaxTicks;
+    if (period <= 0 || this.tick <= 0 || this.tick % period !== 0) return;
+    const floor = this.config.startingLength;
+    for (const snake of this.snakes) {
+      if (!snake.alive || dead.has(snake.id)) continue;
+      if (this.tick - snake.lastAteTick < period) continue;
+      if (snake.body.length > floor) snake.body.pop();
     }
   }
 
-  private collectPowerUp(snake: Snake, head: Cell): void {
+  /**
+   * Drop one or more high-value "special" foods (e.g. a golden apple) onto random
+   * free cells. Deterministic via the game RNG. Used by rule-card modifiers.
+   */
+  addSpecialFood(value: number, count = 1): void {
+    const candidates = this.freeCells();
+    for (let n = 0; n < count && candidates.length > 0; n++) {
+      const i = this.rng.int(candidates.length);
+      const c = candidates[i]!;
+      candidates[i] = candidates[candidates.length - 1]!;
+      candidates.pop();
+      this.food.set(cellKey(c), value);
+    }
+  }
+
+  /** Collect a power-up at `head` (if any) and apply its effect. Returns the
+   * events to emit (the pickup itself, plus a wall placement for "wall"). */
+  private collectPowerUp(snake: Snake, head: Cell): GameEvent[] {
     const k = cellKey(head);
     const kind = this.powerUps.get(k);
-    if (!kind) return;
+    if (!kind) return [];
     this.powerUps.delete(k);
-    if (kind === "frenzy") snake.frenzyUntil = this.tick + this.config.frenzyDurationTicks;
+    const out: GameEvent[] = [
+      { kind: "powerup", id: snake.id, displayName: snake.displayName, isNpc: snake.isNpc, power: kind, tick: this.tick },
+    ];
+    switch (kind) {
+      case "frenzy":
+        snake.frenzyUntil = this.tick + this.config.frenzyDurationTicks;
+        break;
+      case "ghost":
+        snake.ghostUntil = this.tick + this.config.ghostDurationTicks;
+        break;
+      case "flare":
+        snake.flareUntil = this.tick + this.config.flareDurationTicks;
+        break;
+      case "magnet":
+        snake.magnetUntil = this.tick + this.config.magnetDurationTicks;
+        break;
+      case "wall": {
+        const cells = this.dropWall(snake);
+        if (cells.length) {
+          out.push({ kind: "wall", id: snake.id, displayName: snake.displayName, isNpc: snake.isNpc, cells, tick: this.tick });
+        }
+        break;
+      }
+    }
+    return out;
+  }
+
+  /** Place a short static wall just behind a snake's tail, perpendicular to its
+   * heading, to block a pursuer. Returns the cells actually turned into walls. */
+  private dropWall(snake: Snake): Cell[] {
+    const tail = snake.body[snake.body.length - 1]!;
+    const back = DELTA[OPPOSITE[snake.heading]];
+    const perp = snake.heading === "left" || snake.heading === "right"
+      ? { x: 0, y: 1 }
+      : { x: 1, y: 0 };
+    const behind = { x: tail.x + back.x, y: tail.y + back.y };
+    const candidates: Cell[] = [
+      behind,
+      { x: behind.x + perp.x, y: behind.y + perp.y },
+      { x: behind.x - perp.x, y: behind.y - perp.y },
+    ];
+    const bodies = this.occupiedCells();
+    const placed: Cell[] = [];
+    for (const c of candidates) {
+      const ck = cellKey(c);
+      if (!this.inBounds(c)) continue;
+      if (this.obstacles.has(ck) || bodies.has(ck) || this.food.has(ck) || this.powerUps.has(ck)) continue;
+      this.obstacles.add(ck);
+      placed.push(c);
+    }
+    return placed;
+  }
+
+  /** Advance the round's spatial objectives: tally zone occupancy and relay
+   * waypoint progress for every snake still alive after collisions. */
+  private applyObjectives(dead: Set<string>): GameEvent[] {
+    const out: GameEvent[] = [];
+    const zone = this.config.scoreZone;
+    const wps = this.config.waypoints;
+    if (!zone && !wps) return out;
+    for (const s of this.snakes) {
+      if (!s.alive || dead.has(s.id)) continue;
+      const head = s.body[0]!;
+      if (zone && head.x >= zone.x && head.x < zone.x + zone.w && head.y >= zone.y && head.y < zone.y + zone.h) {
+        s.zoneTicks += 1;
+      }
+      if (wps && s.waypointIndex < wps.length) {
+        const target = wps[s.waypointIndex]!;
+        if (head.x === target.x && head.y === target.y) {
+          s.waypointIndex += 1;
+          out.push({
+            kind: "waypoint", id: s.id, displayName: s.displayName, isNpc: s.isNpc,
+            index: s.waypointIndex, cell: { ...target }, tick: this.tick,
+          });
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Drag food one cell toward each magnet-holder's head. Deterministic. */
+  private applyMagnets(): void {
+    const holders = this.snakes.filter((s) => s.alive && s.magnetUntil > this.tick);
+    if (holders.length === 0) return;
+    const radius = this.config.magnetRadius;
+    const occupied = this.occupiedCells();
+    for (const snake of holders) {
+      const head = snake.body[0]!;
+      // Snapshot current food keys so a pulled cell isn't reprocessed this tick.
+      for (const fk of [...this.food.keys()]) {
+        const v = this.food.get(fk);
+        if (v == null) continue;
+        const comma = fk.indexOf(",");
+        const fx = Number(fk.slice(0, comma));
+        const fy = Number(fk.slice(comma + 1));
+        const dist = Math.abs(fx - head.x) + Math.abs(fy - head.y);
+        if (dist === 0 || dist > radius) continue;
+        // Step one cell toward the head along the axis with the larger gap.
+        let nx = fx;
+        let ny = fy;
+        if (Math.abs(head.x - fx) >= Math.abs(head.y - fy)) nx = fx + Math.sign(head.x - fx);
+        else ny = fy + Math.sign(head.y - fy);
+        const nk = key(nx, ny);
+        if (!this.inBounds({ x: nx, y: ny })) continue;
+        if (this.obstacles.has(nk) || this.food.has(nk) || this.powerUps.has(nk) || occupied.has(nk)) continue;
+        this.food.delete(fk);
+        this.food.set(nk, v);
+      }
+    }
   }
 
   private spawnValue(): number {
@@ -381,8 +675,22 @@ export class Game {
       const c = candidates[i]!;
       candidates[i] = candidates[candidates.length - 1]!;
       candidates.pop();
-      this.powerUps.set(cellKey(c), "frenzy");
+      this.powerUps.set(cellKey(c), this.pickPowerKind());
     }
+  }
+
+  /** Choose a power-up kind by configured weight (deterministic via the RNG). */
+  private pickPowerKind(): PowerKind {
+    const weights = this.config.powerUpWeights;
+    let total = 0;
+    for (const w of weights) total += Math.max(0, w.weight);
+    if (total <= 0) return "frenzy";
+    let roll = this.rng.int(total);
+    for (const w of weights) {
+      roll -= Math.max(0, w.weight);
+      if (roll < 0) return w.kind;
+    }
+    return weights[weights.length - 1]!.kind;
   }
 }
 

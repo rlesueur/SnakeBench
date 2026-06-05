@@ -13,13 +13,21 @@ function cfg(over: Partial<GameConfig> = {}): GameConfig {
     foodTypes: [{ value: 1, weight: 1 }],
     carcassFoodValue: 2,
     obstacleDensity: 0,
+    foodGrows: true,
     absorbFraction: 0.5,
+    cutoffAbsorbFraction: 0,
+    headToHead: "longest",
     comboWindowTicks: 4,
     comboMaxBonus: 4,
     powerUpTarget: 0,
+    powerUpWeights: [{ kind: "frenzy", weight: 1 }],
     frenzyDurationTicks: 30,
-    shedSegments: 3,
-    shedMinLength: 3,
+    ghostDurationTicks: 12,
+    flareDurationTicks: 40,
+    flareVisionBonus: 14,
+    magnetDurationTicks: 25,
+    magnetRadius: 5,
+    lengthTaxTicks: 0,
     visionRadius: 5,
     startingLength: 3,
     maxTicks: 100,
@@ -113,6 +121,54 @@ describe("collisions", () => {
     expect(game.snakeById("long")!.alive).toBe(true);
     expect(game.snakeById("short")!.alive).toBe(false);
   });
+
+  it("inverts head-to-head when the rule is shortest-wins", () => {
+    const game = Game.create(
+      [
+        { id: "long", displayName: "long", isNpc: false },
+        { id: "short", displayName: "short", isNpc: false },
+      ],
+      "seed",
+      cfg({ headToHead: "shortest" }),
+    );
+    setBody(game, "long", "right", [
+      { x: 5, y: 5 },
+      { x: 4, y: 5 },
+      { x: 3, y: 5 },
+      { x: 2, y: 5 },
+    ]);
+    setBody(game, "short", "left", [
+      { x: 7, y: 5 },
+      { x: 8, y: 5 },
+    ]);
+    game.step(new Map()); // both heads -> (6,5)
+    expect(game.snakeById("short")!.alive).toBe(true);
+    expect(game.snakeById("long")!.alive).toBe(false);
+  });
+
+  it("kills both snakes in a head-to-head when the rule is all_die", () => {
+    const game = Game.create(
+      [
+        { id: "long", displayName: "long", isNpc: false },
+        { id: "short", displayName: "short", isNpc: false },
+      ],
+      "seed",
+      cfg({ headToHead: "all_die" }),
+    );
+    setBody(game, "long", "right", [
+      { x: 5, y: 5 },
+      { x: 4, y: 5 },
+      { x: 3, y: 5 },
+      { x: 2, y: 5 },
+    ]);
+    setBody(game, "short", "left", [
+      { x: 7, y: 5 },
+      { x: 8, y: 5 },
+    ]);
+    game.step(new Map()); // both heads -> (6,5)
+    expect(game.snakeById("short")!.alive).toBe(false);
+    expect(game.snakeById("long")!.alive).toBe(false);
+  });
 });
 
 describe("new mechanics", () => {
@@ -171,20 +227,221 @@ describe("new mechanics", () => {
     expect(game.snakeById("s1")!.pendingGrowth).toBe(5);
   });
 
-  it("sheds tail segments into food", () => {
-    const game = single(cfg({ width: 20 }));
+  it("withers a snake that hasn't eaten under famine (length tax)", () => {
+    const game = single(cfg({ width: 40, lengthTaxTicks: 4 }));
     setBody(game, "s1", "right", [
       { x: 8, y: 5 },
       { x: 7, y: 5 },
       { x: 6, y: 5 },
       { x: 5, y: 5 },
       { x: 4, y: 5 },
+    ]);
+    for (let i = 0; i < 5; i++) game.step(new Map([["s1", "right"]]));
+    // At tick 4 (tick % 4 === 0) with no food eaten, it loses one tail segment.
+    expect(game.snakeById("s1")!.body.length).toBe(4);
+  });
+
+  it("places a high-value special food on the board", () => {
+    const game = single(cfg({ width: 20 }));
+    game.addSpecialFood(12, 1);
+    const golden = [...game.food.values()].filter((v) => v >= 12);
+    expect(golden.length).toBe(1);
+  });
+
+  it("credits a cut-off kill when an enemy runs into your body", () => {
+    const game = Game.create(
+      [
+        { id: "k", displayName: "k", isNpc: false },
+        { id: "v", displayName: "v", isNpc: false },
+      ],
+      "seed",
+      cfg({ width: 20 }),
+    );
+    setBody(game, "k", "left", [
+      { x: 5, y: 5 },
+      { x: 6, y: 5 },
+      { x: 7, y: 5 },
+    ]);
+    setBody(game, "v", "down", [
+      { x: 6, y: 4 },
+      { x: 6, y: 3 },
+    ]);
+    const events = game.step(new Map([["k", "left"], ["v", "down"]])); // v -> (6,5) = k's body
+    expect(game.snakeById("v")!.alive).toBe(false);
+    expect(game.snakeById("k")!.alive).toBe(true);
+    const kill = events.find((e) => e.kind === "kill");
+    expect(kill && kill.kind === "kill" && kill.id).toBe("k");
+    expect(kill && kill.kind === "kill" && kill.victim).toBe("v");
+  });
+
+  it("ghost lets a snake pass through a body without dying", () => {
+    const game = Game.create(
+      [
+        { id: "g", displayName: "g", isNpc: false },
+        { id: "b", displayName: "b", isNpc: false },
+      ],
+      "seed",
+      cfg({ width: 20 }),
+    );
+    setBody(game, "b", "left", [
+      { x: 5, y: 5 },
+      { x: 6, y: 5 },
+      { x: 7, y: 5 },
+    ]);
+    setBody(game, "g", "down", [
+      { x: 6, y: 4 },
+      { x: 6, y: 3 },
+    ]);
+    game.snakeById("g")!.ghostUntil = 10; // ghost active
+    game.step(new Map([["b", "left"], ["g", "down"]])); // g -> (6,5) = b's body
+    expect(game.snakeById("g")!.alive).toBe(true); // passed through, no death
+  });
+
+  it("a vision flare widens the agent view radius", async () => {
+    const { buildAgentView } = await import("../src/server/view.js");
+    const game = single(cfg({ width: 60, height: 60, visionRadius: 5, flareVisionBonus: 14 }));
+    setBody(game, "s1", "right", [{ x: 30, y: 30 }]);
+    const before = buildAgentView(game, "s1", 0).vision.radius;
+    game.snakeById("s1")!.flareUntil = 100;
+    const after = buildAgentView(game, "s1", 0).vision.radius;
+    expect(before).toBe(5);
+    expect(after).toBe(19);
+  });
+
+  it("a magnet drags nearby food one cell toward the head", () => {
+    const game = single(cfg({ width: 40, height: 40, magnetRadius: 6 }));
+    setBody(game, "s1", "right", [{ x: 10, y: 10 }]);
+    game.food.clear();
+    game.food.set("15,10", 1); // 5 cells east of the head
+    game.snakeById("s1")!.magnetUntil = 100;
+    game.step(new Map([["s1", "up"]])); // head moves to (10,9); magnet still pulls
+    // Food should have advanced one cell toward the head's column (x decreases).
+    const xs = [...game.food.keys()].map((k) => Number(k.split(",")[0]));
+    expect(Math.min(...xs)).toBeLessThan(15);
+  });
+
+  it("the wall power-up drops obstacles behind the snake", () => {
+    const game = single(cfg({ width: 30, height: 30, obstacleDensity: 0 }));
+    setBody(game, "s1", "right", [
+      { x: 10, y: 10 },
+      { x: 9, y: 10 },
+      { x: 8, y: 10 },
+    ]);
+    game.powerUps.set("11,10", "wall"); // place a wall pickup in front
+    const before = game.obstacles.size;
+    const events = game.step(new Map([["s1", "right"]])); // eat the pickup
+    expect(game.obstacles.size).toBeGreaterThan(before);
+    expect(events.some((e) => e.kind === "wall")).toBe(true);
+    expect(events.some((e) => e.kind === "powerup" && e.power === "wall")).toBe(true);
+  });
+
+  it("grants the killer growth under a bounty (cut-off absorb)", () => {
+    const game = Game.create(
+      [
+        { id: "k", displayName: "k", isNpc: false },
+        { id: "v", displayName: "v", isNpc: false },
+      ],
+      "seed",
+      cfg({ width: 20, cutoffAbsorbFraction: 0.5 }),
+    );
+    setBody(game, "k", "left", [
+      { x: 5, y: 5 },
+      { x: 6, y: 5 },
+      { x: 7, y: 5 },
+    ]);
+    setBody(game, "v", "down", [
+      { x: 6, y: 4 },
+      { x: 6, y: 3 },
+    ]);
+    game.step(new Map([["k", "left"], ["v", "down"]]));
+    expect(game.snakeById("k")!.pendingGrowth).toBe(1); // floor(2 * 0.5)
+  });
+
+  it("tallies a zone tick only while the head is inside the scoring zone", () => {
+    const game = single(cfg({ width: 30, height: 30, scoreZone: { x: 10, y: 10, w: 4, h: 4 } }));
+    setBody(game, "s1", "right", [
+      { x: 8, y: 10 },
+      { x: 7, y: 10 },
+      { x: 6, y: 10 },
+    ]);
+    game.step(new Map([["s1", "right"]])); // -> (9,10) still outside
+    expect(game.snakeById("s1")!.zoneTicks).toBe(0);
+    game.step(new Map([["s1", "right"]])); // -> (10,10) inside
+    expect(game.snakeById("s1")!.zoneTicks).toBe(1);
+    game.step(new Map([["s1", "right"]])); // -> (11,10) still inside
+    expect(game.snakeById("s1")!.zoneTicks).toBe(2);
+  });
+
+  it("advances the relay waypoint index and emits an event when reached", () => {
+    const game = single(cfg({ width: 30, height: 30, waypoints: [{ x: 8, y: 10 }, { x: 8, y: 12 }] }));
+    setBody(game, "s1", "right", [
+      { x: 6, y: 10 },
+      { x: 5, y: 10 },
+      { x: 4, y: 10 },
+    ]);
+    game.step(new Map([["s1", "right"]])); // -> (7,10), not yet
+    expect(game.snakeById("s1")!.waypointIndex).toBe(0);
+    const events = game.step(new Map([["s1", "right"]])); // -> (8,10) = waypoint 1
+    expect(game.snakeById("s1")!.waypointIndex).toBe(1);
+    expect(events.some((e) => e.kind === "waypoint" && e.index === 1)).toBe(true);
+  });
+
+  it("poison food kills the snake that eats it but small pellets are safe", () => {
+    const game = single(cfg({ width: 20, poisonValue: 3 }));
+    setBody(game, "s1", "right", [
+      { x: 5, y: 5 },
+      { x: 4, y: 5 },
       { x: 3, y: 5 },
     ]);
-    game.step(new Map([["s1", "right"]]), new Set(["s1"]));
-    // length 6 -> move keeps 6, shed 3 down to minLength 3
-    expect(game.snakeById("s1")!.body.length).toBe(3);
-    expect(game.food.size).toBeGreaterThan(0);
+    game.food.clear();
+    game.food.set("6,5", 1); // safe pellet ahead
+    game.step(new Map([["s1", "right"]]));
+    expect(game.snakeById("s1")!.alive).toBe(true);
+    game.food.set("7,5", 6); // poison ahead
+    game.step(new Map([["s1", "right"]]));
+    expect(game.snakeById("s1")!.alive).toBe(false);
+  });
+
+  it("a long snake can cut off and kill a rival (viable hunting)", () => {
+    const game = Game.create(
+      [
+        { id: "k", displayName: "k", isNpc: false },
+        { id: "v", displayName: "v", isNpc: false },
+      ],
+      "seed",
+      cfg({ width: 20, startingLength: 6 }),
+    );
+    // Killer lies across the row; victim is forced down into the killer's body.
+    setBody(game, "k", "left", [
+      { x: 5, y: 5 },
+      { x: 6, y: 5 },
+      { x: 7, y: 5 },
+      { x: 8, y: 5 },
+      { x: 9, y: 5 },
+      { x: 10, y: 5 },
+    ]);
+    setBody(game, "v", "down", [
+      { x: 6, y: 4 },
+      { x: 6, y: 3 },
+    ]);
+    const events = game.step(new Map([["k", "left"], ["v", "down"]])); // v -> (6,5) = k's body
+    expect(game.snakeById("v")!.alive).toBe(false);
+    expect(game.snakeById("k")!.alive).toBe(true);
+    expect(events.some((e) => e.kind === "kill" && e.id === "k" && e.victim === "v")).toBe(true);
+  });
+
+  it("carnivore rounds give no growth from food", () => {
+    const game = single(cfg({ width: 20, foodGrows: false }));
+    setBody(game, "s1", "right", [
+      { x: 5, y: 5 },
+      { x: 4, y: 5 },
+      { x: 3, y: 5 },
+    ]);
+    game.food.clear();
+    game.food.set("6,5", 6); // a juicy pellet right ahead
+    game.step(new Map([["s1", "right"]])); // eat it
+    expect(game.snakeById("s1")!.pendingGrowth).toBe(0); // no growth
+    expect(game.food.has("6,5")).toBe(false); // still consumed/cleared
   });
 });
 

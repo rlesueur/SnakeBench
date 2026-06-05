@@ -1,9 +1,9 @@
-# Render Blueprint for the Grid Snake benchmark.
+# Render Blueprint for the SnakeBench benchmark.
 # One always-on web service (flat-rate Starter) + a managed Postgres database.
 # Deploy: push to GitHub, then in Render choose "New > Blueprint" and pick this repo.
 services:
   - type: web
-    name: grid-snake
+    name: snakebench
     runtime: node
     plan: starter            # flat ~$7/mo, always-on, no per-request metering
     buildCommand: npm ci && npm run build
@@ -12,9 +12,16 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "20"
+      - key: NODE_ENV
+        value: production
       - key: TICK_MS
         value: "2000"
-      # Signed-cookie session secret — generated and kept by Render.
+      # Render terminates TLS and sets x-forwarded-for; trust it so rate limits
+      # see the real client IP.
+      - key: TRUST_PROXY
+        value: "1"
+      # Signed-cookie session secret — generated and kept by Render (256-bit,
+      # well over the 32-char minimum the server enforces in production).
       - key: SESSION_SECRET
         generateValue: true
       # Public base URL of this service; must match the Google OAuth redirect.
@@ -29,9 +36,9 @@ services:
       # Wired automatically from the database below (internal, no egress, no SSL needed).
       - key: DATABASE_URL
         fromDatabase:
-          name: grid-snake-db
+          name: snakebench-db
           property: connectionString
 
 databases:
-  - name: grid-snake-db
+  - name: snakebench-db
     plan: starter            # flat ~$7/mo managed Postgres

@@ -12,6 +12,7 @@ import {
   safeDirections,
   towards,
 } from "./helpers.js";
+import { searchBot } from "./search-bot.js";
 
 function fallback(snake: Snake, rng: Rng, safe: Direction[]): Direction {
   const legal = legalDirections(snake);
@@ -130,6 +131,32 @@ export const NPC_REGISTRY: Record<string, Npc> = {
   survivor: survivorBot,
   hunter: hunterBot,
   glutton: gluttonBot,
+  searcher: searchBot,
 };
 
 export type NpcKind = keyof typeof NPC_REGISTRY;
+
+/**
+ * Fixed Glicko-2 anchor ratings for the NPC roster. NPCs never have their
+ * rating updated — they are a stable yardstick so the real-agent rating scale
+ * is absolute and even single-agent rounds carry signal. RD is kept low so the
+ * anchors exert full pull in a rating period.
+ *
+ * These are EMPIRICALLY CALIBRATED (not guessed): `npm run calibrate` plays many
+ * headless free-for-alls, ranks by survival exactly like the live arena, and
+ * fits a Glicko-2 rating per kind, normalised to a mean of 1500. Under
+ * survival-based ranking the cautious `survivor` is strongest and `hunter`
+ * (which takes head-to-head risks) is the weakest of the competent bots. Re-run
+ * calibration and update these if the NPC strategies or ranking change.
+ */
+export const NPC_ANCHOR: Record<NpcKind, { rating: number; rd: number }> = {
+  random: { rating: 1139, rd: 60 },
+  glutton: { rating: 1426, rd: 60 },
+  hunter: { rating: 1453, rd: 60 },
+  greedy: { rating: 1502, rd: 60 },
+  // The lookahead bot (Voronoi control + 2-ply survival). A strong reference,
+  // but note: under survival-first ranking the cautious one-ply `survivor` still
+  // edges it out — added sophistication does not buy survival in this objective.
+  searcher: { rating: 1692, rd: 60 },
+  survivor: { rating: 1788, rd: 60 },
+};

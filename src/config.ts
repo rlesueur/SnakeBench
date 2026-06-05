@@ -1,10 +1,20 @@
 /**
- * Central, tunable configuration for the Grid Snake + Territory game.
+ * Central, tunable configuration for the SnakeBench game.
  *
  * Every balance knob lives here so playtesting is a one-line change. In
  * particular `tickDeadlineMs` is PROVISIONAL (see spec) and will be tuned
  * against a real agent during local testing.
  */
+import type { PowerKind } from "./types.js";
+/**
+ * Head-to-head collision rule: who survives when two heads meet on the same
+ * cell. Set per-round by the active rule card.
+ *  - "longest":  the longer snake survives (classic).
+ *  - "shortest": the shorter snake survives (inverted).
+ *  - "all_die":  both snakes die — no winner.
+ */
+export type HeadToHead = "longest" | "shortest" | "all_die";
+
 /** A kind of food: how much growth it gives and how often it spawns. */
 export interface FoodType {
   /** Growth (segments / score) awarded when eaten. */
@@ -33,8 +43,36 @@ export interface GameConfig {
   /** Fraction of the grid filled with deadly static obstacles. */
   obstacleDensity: number;
 
+  /** Whether eating food grows you. Set false by "carnivore" cards, where the
+   * only way to grow is to cut rivals off and eat the carcass. */
+  foodGrows: boolean;
+
+  /** "Poison" rounds: food whose value is >= this KILLS the snake that eats it
+   * (so only small pellets are safe). Undefined = no food is poisonous. */
+  poisonValue?: number;
+
+  /** "Zone" objective: a rectangular scoring region; a snake earns a zoneTick for
+   * every tick its head is inside it. Undefined on non-zone rounds. */
+  scoreZone?: { x: number; y: number; w: number; h: number };
+
+  /** "Relay" objective: an ordered list of waypoint cells each snake must reach in
+   * sequence; reaching the next one scores and advances. Undefined otherwise. */
+  waypoints?: { x: number; y: number }[];
+
+  /** "Bell" objective: the round ends at this tick and snakes are ranked by their
+   * length at that moment. Undefined on non-bell rounds. */
+  bellTick?: number;
+
   /** Fraction of a defeated snake's length absorbed by a head-to-head winner. */
   absorbFraction: number;
+
+  /** Fraction of a victim's length granted to the snake that cut it off (i.e. the
+   * owner of the body an enemy ran into). 0 = kills grant no growth directly (the
+   * victim still drops a carcass to harvest); the "Bounty" modifier raises this. */
+  cutoffAbsorbFraction: number;
+
+  /** Head-to-head collision resolution rule for the round. */
+  headToHead: HeadToHead;
 
   /** Eating again within this many ticks continues a combo. */
   comboWindowTicks: number;
@@ -43,13 +81,25 @@ export interface GameConfig {
 
   /** Number of power-up pickups kept on the board. */
   powerUpTarget: number;
+  /** Relative spawn weights for each collectible power-up kind. */
+  powerUpWeights: { kind: PowerKind; weight: number }[];
   /** How long the frenzy power-up doubles food value, in ticks. */
   frenzyDurationTicks: number;
+  /** How long ghost (pass through snake bodies) lasts, in ticks. */
+  ghostDurationTicks: number;
+  /** How long a vision flare lasts, in ticks. */
+  flareDurationTicks: number;
+  /** Extra vision radius granted while a flare is active. */
+  flareVisionBonus: number;
+  /** How long a magnet pulls food, in ticks. */
+  magnetDurationTicks: number;
+  /** Radius (Manhattan) within which a magnet drags food one cell closer/tick. */
+  magnetRadius: number;
 
-  /** Segments dropped when a snake sheds its tail (escape mechanic). */
-  shedSegments: number;
-  /** A snake cannot shed below this length. */
-  shedMinLength: number;
+  /** Famine decay: if > 0, a snake that has not eaten within this many ticks
+   * loses a tail segment every `lengthTaxTicks` ticks (down to its starting
+   * length). 0 disables the mechanic. */
+  lengthTaxTicks: number;
 
   /** Manhattan radius of an agent's vision window around its head. */
   visionRadius: number;
@@ -73,14 +123,28 @@ export const DEFAULT_CONFIG: GameConfig = {
   ],
   carcassFoodValue: 2,
   obstacleDensity: 0.009,
+  foodGrows: true,
   absorbFraction: 0.5,
+  cutoffAbsorbFraction: 0,
+  headToHead: "longest",
   comboWindowTicks: 4,
   comboMaxBonus: 4,
   powerUpTarget: 8,
+  powerUpWeights: [
+    { kind: "frenzy", weight: 4 },
+    { kind: "ghost", weight: 2 },
+    { kind: "flare", weight: 2 },
+    { kind: "magnet", weight: 2 },
+    { kind: "wall", weight: 2 },
+  ],
   frenzyDurationTicks: 30,
-  shedSegments: 3,
-  shedMinLength: 3,
-  visionRadius: 15,
+  ghostDurationTicks: 12,
+  flareDurationTicks: 40,
+  flareVisionBonus: 14,
+  magnetDurationTicks: 25,
+  magnetRadius: 5,
+  lengthTaxTicks: 0,
+  visionRadius: 24,
   startingLength: 3,
   maxTicks: 1200,
 };
@@ -96,8 +160,15 @@ export interface ServerConfig {
   npcBackfill: string[];
   /** Pause between a round ending and the next starting, in ms. */
   roundRestartDelayMs: number;
+  /** Grace window after the first agent joins an ambient lobby before the next
+   * player round begins, so a burst of agents arriving together share a round. */
+  joinGraceMs: number;
   /** Target grid cells per snake — drives dynamic play-area sizing. */
   cellsPerSnake: number;
+  /** Maximum real agents placed in a single round. Agents beyond this are
+   * queued for the next round (the world stops growing at its size cap, so
+   * this keeps board density playable). */
+  maxAgentsPerRound: number;
   /** Tick length for ambient (no-agent) attract rounds — faster than the agent
    * deadline so the spectator keeps cycling when nobody is connected. */
   ambientTickMs: number;
@@ -112,9 +183,11 @@ export const DEFAULT_SERVER_CONFIG: ServerConfig = {
   port: 8080,
   minSnakes: 12,
   npcFloor: 2,
-  npcBackfill: ["greedy", "survivor", "hunter", "glutton"],
+  npcBackfill: ["greedy", "survivor", "hunter", "glutton", "searcher"],
   roundRestartDelayMs: 2000,
+  joinGraceMs: 2000,
   cellsPerSnake: 1400,
+  maxAgentsPerRound: 48,
   ambientTickMs: 200,
   ambientMaxTicks: 600,
   stallTicks: 160,

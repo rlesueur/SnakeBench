@@ -10,7 +10,6 @@ export interface FoodView {
 export interface AgentView {
   schema_version: 1;
   tick: number;
-  seed: string;
   world: { width: number; height: number };
   vision: { center_x: number; center_y: number; radius: number };
   you: {
@@ -20,7 +19,15 @@ export interface AgentView {
     peak_size: number;
     combo: number;
     frenzy_ticks_left: number;
-    can_shed: boolean;
+    ghost_ticks_left: number;
+    flare_ticks_left: number;
+    magnet_ticks_left: number;
+    /** Ticks this snake has spent inside the scoring zone ("zone" objective). */
+    zone_ticks: number;
+    /** Waypoints reached so far ("relay" objective). */
+    waypoints_done: number;
+    /** The next waypoint to head for ("relay" objective), or null. */
+    next_waypoint: Cell | null;
     head: Cell;
     body: Cell[];
   };
@@ -48,6 +55,11 @@ function decode(k: string): Cell {
  * Build the vision-scoped state payload for one agent. Everything is clipped to
  * a Manhattan radius around the agent's head — never a full map dump. This both
  * keeps prompts small and makes the game a partial-information reasoning task.
+ *
+ * The world's RNG seed is deliberately NOT included: the engine is fully
+ * deterministic, so leaking the seed would let an agent reconstruct the entire
+ * map (obstacles, future food spawns) outside its vision and defeat the
+ * partial-observability the benchmark is built on.
  */
 export function buildAgentView(
   game: Game,
@@ -58,7 +70,9 @@ export function buildAgentView(
   if (!me) throw new Error(`Unknown snake: ${snakeId}`);
 
   const head = me.body[0]!;
-  const radius = game.config.visionRadius;
+  // A vision flare temporarily widens this snake's sight radius.
+  const flared = me.flareUntil > game.tick;
+  const radius = game.config.visionRadius + (flared ? game.config.flareVisionBonus : 0);
   const visible = (c: Cell) => Math.abs(c.x - head.x) + Math.abs(c.y - head.y) <= radius;
 
   const food: FoodView[] = [];
@@ -94,7 +108,6 @@ export function buildAgentView(
   return {
     schema_version: 1,
     tick: game.tick,
-    seed: game.seed,
     world: { width: game.config.width, height: game.config.height },
     vision: { center_x: head.x, center_y: head.y, radius },
     you: {
@@ -104,7 +117,14 @@ export function buildAgentView(
       peak_size: me.peakSize,
       combo: me.comboLevel,
       frenzy_ticks_left: Math.max(0, me.frenzyUntil - game.tick),
-      can_shed: me.body.length > game.config.shedMinLength,
+      ghost_ticks_left: Math.max(0, me.ghostUntil - game.tick),
+      flare_ticks_left: Math.max(0, me.flareUntil - game.tick),
+      magnet_ticks_left: Math.max(0, me.magnetUntil - game.tick),
+      zone_ticks: me.zoneTicks,
+      waypoints_done: me.waypointIndex,
+      next_waypoint: game.config.waypoints?.[me.waypointIndex]
+        ? { ...game.config.waypoints[me.waypointIndex]! }
+        : null,
       head: { ...head },
       body: me.body.filter(visible).map((c) => ({ ...c })),
     },

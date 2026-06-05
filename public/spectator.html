@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Grid Snake — Spectator</title>
+    <title>SnakeBench — Spectator</title>
     <style>
       * { box-sizing: border-box; }
       html, body { height: 100%; margin: 0; }
@@ -63,8 +63,21 @@
         box-shadow: 0 10px 40px rgba(10, 30, 50, 0.35);
         overflow: hidden auto;
       }
+      #ruleCard { flex: 0 0 auto; padding-bottom: 10px; }
       #lbCard { flex: 1 1 auto; min-height: 120px; }
-      #statsCard { flex: 0 0 auto; max-height: 42%; }
+      #statsCard { flex: 0 0 auto; max-height: 38%; }
+
+      /* Active rule card */
+      .ruleName { font-size: 16px; font-weight: 800; color: #ffd54a; margin: 0 6px 5px; letter-spacing: .2px; }
+      .ruleBrief { font-size: 12px; color: #cfe6f4; margin: 0 6px 9px; line-height: 1.45; }
+      .modBrief { color: #ffcf6b; }
+      .pills { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 6px; }
+      .pill {
+        font-size: 10px; letter-spacing: .3px; padding: 2px 8px; border-radius: 999px;
+        background: rgba(95, 178, 255, 0.16); border: 1px solid rgba(95, 178, 255, 0.32);
+        color: #cfe6f4; text-transform: uppercase; white-space: nowrap;
+      }
+      .pill.warn { background: rgba(255, 143, 143, 0.16); border-color: rgba(255, 143, 143, 0.42); color: #ffc9c9; }
       .card h2 {
         margin: 2px 6px 10px; font-size: 12px; letter-spacing: .6px;
         text-transform: uppercase; color: #9fc6dc;
@@ -95,6 +108,48 @@
       .lbrow .nm { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .lbrow .ai { font-size: 9px; padding: 1px 6px; border-radius: 999px; background: rgba(95,178,255,.25); color: #bfe0ff; letter-spacing: .4px; }
       .lbrow .sz { font-variant-numeric: tabular-nums; color: #cfe6f4; }
+      .lbpager {
+        display: none; align-items: center; justify-content: center; gap: 10px;
+        margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.08);
+      }
+      .lbpager .pginfo { font-size: 11px; color: #9fc6dc; font-variant-numeric: tabular-nums; }
+      .pgbtn {
+        background: rgba(95,178,255,0.14); border: 1px solid rgba(95,178,255,0.3);
+        color: #cfe6f4; border-radius: 8px; width: 26px; height: 22px; cursor: pointer;
+        font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
+      }
+      .pgbtn:hover:not(:disabled) { background: rgba(95,178,255,0.28); }
+      .pgbtn:disabled { opacity: .35; cursor: default; }
+
+      /* Live kill / commentary feed, lower-left above the legend */
+      #feed {
+        bottom: 58px; left: 16px; width: 320px;
+        display: flex; flex-direction: column-reverse; gap: 5px;
+        pointer-events: none;
+      }
+      .feedrow {
+        background: rgba(11, 30, 44, 0.62);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-left-width: 3px;
+        border-radius: 8px;
+        padding: 5px 10px; font-size: 12.5px; color: #dceaf4;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+        animation: feedIn .25s ease-out;
+        transition: opacity .6s;
+      }
+      .feedrow b { color: #eaf4fb; }
+      .feedrow.kill { border-left-color: #ffd54a; }
+      .feedrow.death { border-left-color: #ff6b6b; }
+      .feedrow.frenzy { border-left-color: #a06bff; }
+      .feedrow.say { border-left-color: #5fd0ff; color: #bfe0ff; }
+      @keyframes feedIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: none; } }
+
+      /* All-time rating delta chips */
+      .strow .dlt { width: 30px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
+      .strow .dlt.up { color: #5fe39b; }
+      .strow .dlt.down { color: #ff7b7b; }
+      .strow .dlt.flat { color: #5a7689; }
 
       /* Legend / status, bottom-left */
       #foot { bottom: 16px; left: 16px; display: flex; gap: 8px; align-items: center; }
@@ -137,34 +192,48 @@
     <div id="vignette"></div>
 
     <div id="hud" class="overlay">
-      <span class="chip title">Grid Snake</span>
+      <span class="chip title">SnakeBench</span>
       <a class="chip link" href="/account.html">Sign in / Account</a>
       <a class="chip link" href="/guide.html">How to play</a>
-      <span class="chip">Round <b id="round">–</b></span>
-      <span class="chip">Tick <b id="tick">0</b></span>
-      <span class="chip">Alive <b id="alive">0</b></span>
+      <a class="chip link" href="/faq.html">Rules &amp; FAQ</a>
+      <span class="chip">Round <b id="round">–</b> · Tick <b id="tick">0</b> · <b id="alive">0</b> alive</span>
       <span class="chip" id="followChip">Following <b id="followName">–</b><span class="x" id="unfollow">✕</span></span>
     </div>
 
     <div id="rightCol" class="overlay">
+      <div id="ruleCard" class="card">
+        <h2>Rules this round</h2>
+        <div id="ruleName" class="ruleName">—</div>
+        <div id="ruleBrief" class="ruleBrief"></div>
+        <div id="rulePills" class="pills"></div>
+      </div>
       <div id="lbCard" class="card">
-        <h2>This round <span class="hint">click to follow</span></h2>
+        <h2>This round <span id="lbMetric" class="hint">click to follow</span></h2>
         <div id="leaderboard"></div>
+        <div id="lbPager" class="lbpager"></div>
       </div>
       <div id="statsCard" class="card">
-        <h2>All-time <span class="hint">wins · best</span></h2>
+        <h2>All-time <span class="hint">skill rating · decision quality</span></h2>
         <div id="stats"></div>
+        <div id="statsPager" class="lbpager"></div>
       </div>
     </div>
+
+    <div id="feed" class="overlay"></div>
 
     <div id="foot" class="overlay">
       <span class="chip" id="status">Connecting…</span>
       <span class="chip">
-        <span class="dotleg"><i style="background:#ffe34d;box-shadow:0 0 8px #ffe34d"></i>+1</span>&nbsp;
+        <span class="dotleg"><i style="background:#ffe34d;box-shadow:0 0 8px #ffe34d"></i>food +1</span>&nbsp;
         <span class="dotleg"><i style="background:#ff8f3a;box-shadow:0 0 8px #ff8f3a"></i>+3</span>&nbsp;
         <span class="dotleg"><i style="background:#ff4fd8;box-shadow:0 0 8px #ff4fd8"></i>+6</span>&nbsp;
-        <span class="dotleg"><i style="background:#a06bff;box-shadow:0 0 8px #a06bff;border-radius:2px"></i>frenzy</span>&nbsp;
-        <span class="dotleg"><i style="background:#37506a;border-radius:2px"></i>wall</span>
+        <span class="dotleg"><i style="background:#a06bff;box-shadow:0 0 8px #a06bff"></i>⚡ frenzy</span>&nbsp;
+        <span class="dotleg"><i style="background:#46e0d0;box-shadow:0 0 8px #46e0d0"></i>◌ ghost</span>&nbsp;
+        <span class="dotleg"><i style="background:#ffd24a;box-shadow:0 0 8px #ffd24a"></i>✦ flare</span>&nbsp;
+        <span class="dotleg"><i style="background:#ff7a4a;box-shadow:0 0 8px #ff7a4a"></i>⊓ magnet</span>&nbsp;
+        <span class="dotleg"><i style="background:#9aa7b3;box-shadow:0 0 8px #9aa7b3"></i>▦ wall</span>&nbsp;
+        <span class="dotleg"><i style="background:#37506a;border-radius:2px"></i>obstacle</span>
+        <span id="legdyn"></span>
       </span>
     </div>
 
@@ -189,11 +258,18 @@
         tick: document.getElementById("tick"),
         alive: document.getElementById("alive"),
         lb: document.getElementById("leaderboard"),
+        lbPager: document.getElementById("lbPager"),
         stats: document.getElementById("stats"),
+        statsPager: document.getElementById("statsPager"),
         status: document.getElementById("status"),
         followChip: document.getElementById("followChip"),
         followName: document.getElementById("followName"),
+        feed: document.getElementById("feed"),
+        ruleName: document.getElementById("ruleName"),
+        ruleBrief: document.getElementById("ruleBrief"),
+        rulePills: document.getElementById("rulePills"),
       };
+      let currentRules = null;
 
       let world = { width: 200, height: 200 };
       let obstacles = [];
@@ -238,6 +314,7 @@
       const darkCol = (id) => colsFor(id).dark;
       const headCol = (id) => colsFor(id).head;
       function foodStyle(v) {
+        if (v >= 10) return { col: "#ffd700", r: 0.85 }; // golden apple
         if (v >= 6) return { col: "#ff4fd8", r: 0.62 };
         if (v >= 3) return { col: "#ff8f3a", r: 0.52 };
         return { col: "#ffe34d", r: 0.42 };
@@ -361,6 +438,39 @@
         ctx.clip();
         drawHoneycomb(bx, by, bw, bh);
 
+        // Scoring zone ("zone" objective) — a glowing region you score by occupying.
+        const zone = currentRules && currentRules.zone;
+        if (zone) {
+          const zx = sx(zone.x), zy = sy(zone.y);
+          const zw = zone.w * cam.scale, zh = zone.h * cam.scale;
+          const pulse = 0.10 + 0.06 * Math.sin(performance.now() / 400);
+          ctx.save();
+          ctx.fillStyle = `rgba(86,204,242,${pulse})`;
+          ctx.fillRect(zx, zy, zw, zh);
+          ctx.strokeStyle = "rgba(86,204,242,0.85)";
+          ctx.lineWidth = Math.max(1.5, cam.scale * 0.18);
+          ctx.setLineDash([cam.scale * 0.8, cam.scale * 0.5]);
+          ctx.strokeRect(zx, zy, zw, zh);
+          ctx.restore();
+        }
+
+        // Waypoints ("relay" objective) — numbered markers along the route.
+        const wps = currentRules && currentRules.waypoints;
+        if (wps && wps.length) {
+          const r = Math.max(3, cam.scale * 0.5);
+          ctx.save();
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.font = `${Math.max(8, Math.round(cam.scale * 0.8))}px system-ui`;
+          for (let i = 0; i < wps.length; i++) {
+            const x = sx(wps[i].x + 0.5), y = sy(wps[i].y + 0.5);
+            ctx.beginPath(); ctx.arc(x, y, r, 0, 7);
+            ctx.fillStyle = "rgba(255,210,74,0.22)"; ctx.fill();
+            ctx.strokeStyle = "#ffd24a"; ctx.lineWidth = Math.max(1, cam.scale * 0.12); ctx.stroke();
+            if (cam.scale >= 5) { ctx.fillStyle = "#ffe9a8"; ctx.fillText(String(i + 1), x, y + 0.5); }
+          }
+          ctx.restore();
+        }
+
         // Obstacles — solid slate blocks with an edge and top highlight so they read as walls.
         if (obstacles.length) {
           const og = Math.max(0.4, cam.scale * 0.06);
@@ -395,21 +505,30 @@
           }
           ctx.restore();
 
-          // Power-ups (frenzy diamonds).
+          // Power-ups (colour + glyph per kind).
           if (cur.powerUps && cur.powerUps.length) {
             const pulse = 0.78 + 0.22 * Math.sin(performance.now() / 250);
             const r = Math.max(2, cam.scale * 0.62) * pulse;
-            ctx.save();
-            ctx.fillStyle = "#a06bff";
-            ctx.shadowColor = "#a06bff";
-            ctx.shadowBlur = r * 2.2;
             for (const p of cur.powerUps) {
+              const col = POWER_COL[p.kind] || "#a06bff";
               const x = sx(p.x + 0.5), y = sy(p.y + 0.5);
+              ctx.save();
+              ctx.fillStyle = col;
+              ctx.shadowColor = col;
+              ctx.shadowBlur = r * 2.2;
               ctx.beginPath();
               ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y);
               ctx.closePath(); ctx.fill();
+              ctx.restore();
+              if (cam.scale >= 6) {
+                ctx.save();
+                ctx.fillStyle = "#0a0f14";
+                ctx.font = `${Math.round(cam.scale * 0.7)}px system-ui`;
+                ctx.textAlign = "center"; ctx.textBaseline = "middle";
+                ctx.fillText(POWER_GLYPH[p.kind] || "?", x, y + 0.5);
+                ctx.restore();
+              }
             }
-            ctx.restore();
           }
 
           // Snakes.
@@ -434,22 +553,75 @@
         if (!cur) return;
         // Name labels (+ combo badge) — only when not too tiny.
         if (cam.scale >= 3) {
-          ctx.font = "700 12px 'Segoe UI', system-ui, sans-serif";
           ctx.textAlign = "center";
           ctx.textBaseline = "bottom";
+          const notes = cur.notes;
           for (const s of cur.snakes) {
             if (!s.alive || !s.body.length) continue;
             const h = interpHead(s);
             const x = sx(h.x), y = sy(h.y) - cam.scale * 0.7 - 4;
             let label = s.displayName;
+            if (s.score != null) label += `  ◆${s.score}`;
             if (s.combo > 1) label += `  x${s.combo}`;
+            ctx.font = "700 12px 'Segoe UI', system-ui, sans-serif";
             ctx.lineWidth = 3.5;
             ctx.strokeStyle = "rgba(4,14,22,0.85)";
             ctx.strokeText(label, x, y);
             ctx.fillStyle = headCol(s.id);
             ctx.fillText(label, x, y);
+
+            // Live server-authoritative status under each AI snake's name —
+            // structured telemetry (move · length · threats · space) that
+            // actually changes tick to tick, not a static "safe".
+            const note = notes && notes.get(s.id);
+            if (note && !s.isNpc) {
+              const txt = fmtNote(note);
+              if (txt) {
+                ctx.font = "600 10.5px 'Segoe UI', system-ui, sans-serif";
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = "rgba(4,14,22,0.8)";
+                ctx.strokeText(txt, x, y + 13);
+                ctx.fillStyle = noteColour(note);
+                ctx.fillText(txt, x, y + 13);
+              }
+            }
           }
         }
+      }
+      const NOTE_COL = {
+        safe: "#9fe6c2", risky: "#ffd27a", blunder: "#ff8f8f",
+        timeout: "#c9a0ff", illegal: "#ff8f8f",
+      };
+      // Colour + glyph per power-up kind (shared by board, auras and feed).
+      const POWER_COL = {
+        frenzy: "#a06bff", ghost: "#46e0d0", flare: "#ffd24a", magnet: "#ff7a4a", wall: "#9aa7b3",
+      };
+      const POWER_GLYPH = { frenzy: "⚡", ghost: "◌", flare: "✦", magnet: "⊓", wall: "▦" };
+      const ARROW = { up: "↑", down: "↓", left: "←", right: "→" };
+      // Per-snake overlay: lead with the agent's *declared* intent (one short
+      // token, optionally a target), so it actually says what the agent is doing.
+      // Falls back to structured telemetry when an agent declares nothing.
+      function fmtNote(n) {
+        if (!n) return "";
+        if (n.kind === "timeout") return "timed out";
+        if (n.kind === "illegal") return "illegal move";
+        const arrow = ARROW[n.move] || "";
+        if (n.intent) {
+          const tgt = n.target ? " → " + n.target : "";
+          const mark = n.intentOk === false ? " (?)" : "";
+          return `${arrow} ${n.intent}${tgt}${mark}`.trim();
+        }
+        const parts = [];
+        if (n.len != null) parts.push("len " + n.len);
+        if (n.threats) parts.push(n.threats + " near");
+        const body = parts.length ? parts.join(" · ") : "no intent declared";
+        return (arrow ? arrow + " " : "") + body;
+      }
+      // Amber when the declared intent doesn't match the board; otherwise colour
+      // by the server's move classification.
+      function noteColour(n) {
+        if (n.intent && n.intentOk === false) return "#ffd27a";
+        return NOTE_COL[n.kind] || "#cfe6f4";
       }
 
       function drawHoneycomb(bx, by, bw, bh) {
@@ -484,14 +656,20 @@
         if (pts.length > 1) {
           ctx.lineCap = "round";
           ctx.lineJoin = "round";
-          if (s.frenzy) {
+          const fx = s.effects && s.effects.length ? s.effects : (s.frenzy ? ["frenzy"] : []);
+          let auraStep = 0;
+          for (const ef of fx) {
+            const col = POWER_COL[ef];
+            if (!col) continue;
             ctx.save();
-            ctx.shadowColor = "#a06bff";
+            ctx.globalAlpha = ef === "ghost" ? 0.55 : 0.85;
+            ctx.shadowColor = col;
             ctx.shadowBlur = Math.max(6, cam.scale * 1.2);
-            ctx.strokeStyle = "rgba(160,107,255,0.9)";
-            ctx.lineWidth = wBody + Math.max(2, cam.scale * 0.5);
+            ctx.strokeStyle = col;
+            ctx.lineWidth = wBody + Math.max(2, cam.scale * 0.5) + auraStep;
             strokePath(pts);
             ctx.restore();
+            auraStep += Math.max(1.5, cam.scale * 0.32);
           }
           if (followed) {
             ctx.save();
@@ -670,51 +848,202 @@
         else if (e.key === "Escape") setMode("full");
       });
 
-      // --- leaderboard ---
+      // --- leaderboard (paged) ---
+      let lbPage = 0;
+      const LB_PAGE = 10;
+
       function renderLeaderboard() {
         if (!cur) return;
         const snakes = cur.snakes;
-        const sorted = [...snakes].sort((a, b) => b.size - a.size);
+        const obj = (currentRules && currentRules.objective) || "survive";
+        const METRIC = {
+          survive: "length", grow: "peak length", kills: "kills",
+          zone: "zone ticks", relay: "waypoints", bell: "length", fasting: "length (smallest wins)",
+        };
+        const metricEl = document.getElementById("lbMetric");
+        if (metricEl) metricEl.textContent = "by " + (METRIC[obj] || "length");
+        // The number shown per snake is its standing on the round's win condition.
+        // The server computes this into `score`; plain survival has none, so fall
+        // back to current length there.
+        const val = (s) => (s.score != null ? s.score : s.size);
+        const aliveFirst = (a, b) => (b.alive ? 1 : 0) - (a.alive ? 1 : 0);
+        // Mirror the arena's end-of-round ranking so the live board previews the result.
+        const cmp = (a, b) => {
+          switch (obj) {
+            case "grow": return b.peakSize - a.peakSize || aliveFirst(a, b);
+            case "kills":
+            case "zone":
+            case "relay": return val(b) - val(a) || aliveFirst(a, b) || b.peakSize - a.peakSize;
+            case "bell": return aliveFirst(a, b) || b.size - a.size;
+            case "fasting": return aliveFirst(a, b) || a.size - b.size;
+            default: return aliveFirst(a, b) || b.peakSize - a.peakSize; // survive
+          }
+        };
+        const sorted = [...snakes].sort(cmp);
         els.alive.textContent = snakes.filter((s) => s.alive).length;
+
+        const pages = Math.max(1, Math.ceil(sorted.length / LB_PAGE));
+        lbPage = Math.min(Math.max(lbPage, 0), pages - 1);
+        const start = lbPage * LB_PAGE;
+        const pageRows = sorted.slice(start, start + LB_PAGE);
+
         els.lb.innerHTML = "";
-        sorted.slice(0, 12).forEach((s, i) => {
+        pageRows.forEach((s, i) => {
+          const rank = start + i + 1;
           const row = document.createElement("div");
           row.className = "lbrow" + (s.id === follow ? " followed" : "") + (s.alive ? "" : " dead");
           row.innerHTML =
-            `<span class="rk">${i + 1}</span>` +
+            `<span class="rk">${rank}</span>` +
             `<span class="sw" style="background:${bodyCol(s.id)};color:${bodyCol(s.id)}"></span>` +
             `<span class="nm">${escapeHtml(s.displayName)}</span>` +
             (s.isNpc ? "" : `<span class="ai">AI</span>`) +
-            `<span class="sz">${s.size}</span>`;
+            `<span class="sz">${val(s)}</span>`;
           row.onclick = () => setFollow(s.id);
           els.lb.appendChild(row);
         });
+
+        if (sorted.length > LB_PAGE) {
+          const from = start + 1;
+          const to = Math.min(start + LB_PAGE, sorted.length);
+          els.lbPager.style.display = "flex";
+          els.lbPager.innerHTML =
+            `<button class="pgbtn" id="lbPrev"${lbPage === 0 ? " disabled" : ""}>‹</button>` +
+            `<span class="pginfo">${from}–${to} of ${sorted.length}</span>` +
+            `<button class="pgbtn" id="lbNext"${lbPage >= pages - 1 ? " disabled" : ""}>›</button>`;
+          els.lbPager.querySelector("#lbPrev").onclick = () => {
+            lbPage -= 1;
+            renderLeaderboard();
+          };
+          els.lbPager.querySelector("#lbNext").onclick = () => {
+            lbPage += 1;
+            renderLeaderboard();
+          };
+        } else {
+          els.lbPager.style.display = "none";
+          els.lbPager.innerHTML = "";
+        }
+      }
+
+      let stPage = 0;
+      const ST_PAGE = 10;
+      let lastBoard = null;
+      let lastDeltas = {}; // account -> conservative-rating change from the last round
+
+      function applyDeltas(deltas) {
+        if (!deltas) return;
+        lastDeltas = {};
+        for (const d of deltas) lastDeltas[d.account] = d.delta;
       }
 
       function renderStats(board) {
+        if (board) lastBoard = board;
+        board = lastBoard;
         if (!board) return;
         if (!board.length) {
           els.stats.innerHTML = `<div class="strow" style="color:#6f97ae">No games recorded yet.</div>`;
+          els.statsPager.style.display = "none";
+          els.statsPager.innerHTML = "";
           return;
         }
-        let html = `<div class="strow head"><span class="rk">#</span><span class="nm">account</span><span class="v">won</span><span class="v">best</span><span class="v">avg</span></div>`;
-        board.slice(0, 10).forEach((s, i) => {
+
+        const pages = Math.max(1, Math.ceil(board.length / ST_PAGE));
+        stPage = Math.min(Math.max(stPage, 0), pages - 1);
+        const start = stPage * ST_PAGE;
+        const pageRows = board.slice(start, start + ST_PAGE);
+
+        let html = `<div class="strow head"><span class="rk">#</span><span class="nm">account</span><span class="v">rating</span><span class="dlt">±</span><span class="v">quality</span><span class="v">win%</span></div>`;
+        pageRows.forEach((s, i) => {
+          const rating = Math.round(s.conservativeRating ?? 0);
+          const ratingCell = s.provisional ? `${rating}?` : `${rating}`;
+          const quality = s.decisionQuality == null ? "—" : s.decisionQuality;
+          const winPct = Math.round((s.winRate ?? 0) * 100);
+          const d = lastDeltas[s.account];
+          const dCls = d == null || d === 0 ? "flat" : d > 0 ? "up" : "down";
+          const dTxt = d == null ? "" : d === 0 ? "·" : (d > 0 ? "▲" : "▼") + Math.abs(d);
           html +=
             `<div class="strow">` +
-            `<span class="rk">${i + 1}</span>` +
+            `<span class="rk">${start + i + 1}</span>` +
             `<span class="nm">${escapeHtml(s.account)}</span>` +
-            `<span class="v win">${s.wins}</span>` +
-            `<span class="v max">${s.maxSize}</span>` +
-            `<span class="v">${(s.avgSize ?? 0).toFixed(0)}</span>` +
+            `<span class="v win"${s.provisional ? ' title="provisional — not enough games yet"' : ""}>${ratingCell}</span>` +
+            `<span class="dlt ${dCls}">${dTxt}</span>` +
+            `<span class="v max">${quality}</span>` +
+            `<span class="v">${winPct}</span>` +
             `</div>`;
         });
         els.stats.innerHTML = html;
+
+        if (board.length > ST_PAGE) {
+          const from = start + 1;
+          const to = Math.min(start + ST_PAGE, board.length);
+          els.statsPager.style.display = "flex";
+          els.statsPager.innerHTML =
+            `<button class="pgbtn" id="stPrev"${stPage === 0 ? " disabled" : ""}>‹</button>` +
+            `<span class="pginfo">${from}–${to} of ${board.length}</span>` +
+            `<button class="pgbtn" id="stNext"${stPage >= pages - 1 ? " disabled" : ""}>›</button>`;
+          els.statsPager.querySelector("#stPrev").onclick = () => {
+            stPage -= 1;
+            renderStats();
+          };
+          els.statsPager.querySelector("#stNext").onclick = () => {
+            stPage += 1;
+            renderStats();
+          };
+        } else {
+          els.statsPager.style.display = "none";
+          els.statsPager.innerHTML = "";
+        }
       }
 
       function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, (c) =>
           ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
         );
+      }
+
+      // --- active rule card ---
+      const OBJ_LABEL = {
+        survive: "Last alive wins", grow: "Grow biggest", kills: "Most kills",
+        zone: "Hold the zone", relay: "Waypoint race", bell: "Longest at the bell",
+        fasting: "Stay smallest",
+      };
+      const FOOD_LABEL = { normal: "Normal food", scarce: "Scarce food", feast: "Food feast" };
+      function pill(text, warn) {
+        return `<span class="pill${warn ? " warn" : ""}">${escapeHtml(text)}</span>`;
+      }
+      function renderRules(r) {
+        if (!r) return;
+        currentRules = r;
+        const mods = Array.isArray(r.modifiers) ? r.modifiers : [];
+        els.ruleName.textContent = (r.name || "—") + (mods.length ? " +" + mods.length : "");
+        // Card brief, then each active twist on its own line.
+        let briefHtml = `<span>${escapeHtml(r.brief || "")}</span>`;
+        for (const m of mods) {
+          briefHtml += `<br><span class="modBrief">▸ ${escapeHtml(m.brief)}</span>`;
+        }
+        els.ruleBrief.innerHTML = briefHtml;
+        els.rulePills.innerHTML =
+          pill(OBJ_LABEL[r.objective] || r.objective, r.objective !== "survive") +
+          pill(FOOD_LABEL[r.food] || r.food, r.food === "scarce") +
+          (r.food_grows === false ? pill("Food doesn't feed you", true) : "") +
+          (r.poison_value ? pill("Big food = poison ☠", true) : "") +
+          (r.bell_tick ? pill("Bell @ tick " + r.bell_tick, true) : "") +
+          mods.map((m) => pill(m.name, true)).join("");
+
+        // Round-aware legend: only show board elements that exist this round, so
+        // spectators always know what every marker means without clutter.
+        const dyn = document.getElementById("legdyn");
+        if (dyn) {
+          const entries = [];
+          if (mods.some((m) => m.id === "golden_apple"))
+            entries.push('<i style="background:#ffd700;box-shadow:0 0 8px #ffd700"></i>golden apple +12');
+          if (r.objective === "zone")
+            entries.push('<i style="background:rgba(86,204,242,0.55);border:1px solid #56ccf2;border-radius:2px"></i>scoring zone');
+          if (r.objective === "relay")
+            entries.push('<i style="background:transparent;border:2px solid #ffd24a;box-shadow:none"></i>✦ waypoint');
+          if (r.poison_value)
+            entries.push('☠ $/&amp; food = poison');
+          dyn.innerHTML = entries.map((e) => `&nbsp;<span class="dotleg">${e}</span>`).join("");
+        }
       }
 
       function setWorld(w) {
@@ -725,9 +1054,10 @@
         if (!camReady) { cam = { ...camT }; camReady = true; }
       }
 
-      function ingestFrame(f) {
+      function ingestFrame(f, notes) {
         f.recvT = performance.now();
         f.byId = new Map(f.snakes.map((s) => [s.id, s]));
+        f.notes = notes ? new Map(notes.map((n) => [n.id, n])) : null;
         if (cur) {
           const gap = f.recvT - cur.recvT;
           if (gap > 100 && gap < 6000) tickMs = gap;
@@ -735,6 +1065,64 @@
         prev = cur;
         cur = f;
       }
+
+      // --- between-round countdown ---
+      let countdownTimer = null;
+      function clearCountdown() {
+        if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+      }
+      function startCountdown(baseText, ms) {
+        clearCountdown();
+        let remaining = Math.ceil(ms / 1000);
+        const tick = () => {
+          if (remaining <= 0) { clearCountdown(); els.status.textContent = baseText; return; }
+          els.status.textContent = `${baseText} · next round in ${remaining}s`;
+          remaining -= 1;
+        };
+        tick();
+        countdownTimer = setInterval(tick, 1000);
+      }
+
+      // --- live kill / commentary feed (game events only — no per-tick chatter) ---
+      let feed = []; // { html, kind, t }
+      const FEED_MAX = 6;
+      const FEED_TTL = 7000;
+
+      function pushFeed(html, kind) {
+        feed.push({ html, kind, t: performance.now() });
+        if (feed.length > FEED_MAX) feed.shift();
+        renderFeed();
+      }
+      function nm(name, id) {
+        return `<b style="color:${id ? headCol(id) : "#eaf4fb"}">${escapeHtml(name)}</b>`;
+      }
+      function ingestEvents(events) {
+        if (!events) return;
+        for (const e of events) {
+          if (e.kind === "kill") {
+            pushFeed(`${nm(e.displayName, e.id)} ate ${nm(e.victimName, e.victim)} <span style="color:#ffd54a">+${e.amount}</span>`, "kill");
+          } else if (e.kind === "death" && !e.isNpc) {
+            const how = { wall: "hit a wall", obstacle: "hit an obstacle", body: "ran into a snake", head2head: "lost a head-to-head", poison: "ate poison ☠" }[e.cause] || "died";
+            pushFeed(`${nm(e.displayName, e.id)} ${how}`, "death");
+          } else if (e.kind === "powerup" && !e.isNpc) {
+            pushFeed(`${nm(e.displayName, e.id)} grabbed ${e.power} ${POWER_GLYPH[e.power] || ""}`, "frenzy");
+          } else if (e.kind === "wall") {
+            // A dropped wall becomes part of the static obstacle field.
+            for (const c of (e.cells || [])) obstacles.push(c);
+            if (!e.isNpc) pushFeed(`${nm(e.displayName, e.id)} dropped a wall ▦`, "frenzy");
+          } else if (e.kind === "waypoint" && !e.isNpc) {
+            pushFeed(`${nm(e.displayName, e.id)} reached waypoint ${e.index} ✦`, "frenzy");
+          }
+        }
+      }
+      function renderFeed() {
+        const now = performance.now();
+        feed = feed.filter((f) => now - f.t < FEED_TTL);
+        els.feed.innerHTML = feed
+          .map((f) => `<div class="feedrow ${f.kind}" style="opacity:${now - f.t > FEED_TTL - 1200 ? 0.35 : 1}">${f.html}</div>`)
+          .join("");
+      }
+      setInterval(renderFeed, 1000);
 
       function connect() {
         const ws = new WebSocket(`ws://${location.host}/spectate`);
@@ -745,19 +1133,26 @@
             obstacles = msg.obstacles || [];
             setWorld(msg.world);
             ingestFrame(msg.frame);
+            renderRules(msg.rules);
             if (msg.round != null) els.round.textContent = msg.round;
           } else if (msg.type === "round_start") {
+            clearCountdown();
             obstacles = msg.obstacles || [];
             prev = null; cur = null;
+            feed = []; renderFeed();
             setWorld(msg.world);
+            renderRules(msg.rules);
             els.round.textContent = msg.round;
           } else if (msg.type === "frame") {
-            ingestFrame(msg.frame);
+            ingestFrame(msg.frame, msg.notes);
+            ingestEvents(msg.events);
             els.tick.textContent = msg.frame.tick;
           } else if (msg.type === "leaderboard") {
+            applyDeltas(msg.deltas);
             renderStats(msg.board);
             return;
           } else if (msg.type === "round_end") {
+            if (msg.rules) renderRules(msg.rules);
             const why = {
               all_dead: "everyone died",
               last_standing: "last snake standing",
@@ -766,7 +1161,19 @@
               stalemate: "stalemate",
             }[msg.reason] || msg.reason || "";
             const top = msg.standings[0]?.display_name ?? "?";
-            els.status.textContent = `Round ${msg.round}: ${top} won${why ? " (" + why + ")" : ""}`;
+            const base = `Round ${msg.round}: ${top} won${why ? " (" + why + ")" : ""}`;
+            // Round-end highlights in the feed.
+            const h = msg.highlights;
+            if (h) {
+              if (h.survivor) {
+                pushFeed(`🏆 ${nm(h.survivor.name)} survived to tick ${h.survivor.ticks}`, "frenzy");
+              }
+              if (h.topKiller) {
+                pushFeed(`🔥 ${nm(h.topKiller.name)} — ${h.topKiller.kills} kill${h.topKiller.kills === 1 ? "" : "s"}`, "kill");
+              }
+            }
+            if (msg.next_round_in_ms) startCountdown(base, msg.next_round_in_ms);
+            else els.status.textContent = base;
           }
           if (cur) renderLeaderboard();
         };

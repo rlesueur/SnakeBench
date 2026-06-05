@@ -8,11 +8,16 @@ import {
 } from "../config.js";
 import { Game, type SnakeSpec } from "../engine/game.js";
 import { Rng } from "../rng.js";
-import { NPC_REGISTRY, type NpcKind } from "../npc/bots.js";
-import { DIRECTIONS, type Direction } from "../types.js";
+import { NPC_REGISTRY, NPC_ANCHOR, type NpcKind } from "../npc/bots.js";
+import { DIRECTIONS, DELTA, type Direction, type Cell, type Snake, cellKey } from "../types.js";
+import { analyseMove, type MoveContext, SPACE_CAP } from "../engine/decision-quality.js";
+import { expandStandings, DEFAULT_RATING, DEFAULT_RD } from "../rating/glicko2.js";
 import { buildAgentView } from "./view.js";
+import { pickRuleCard, rollModifiers, foodMultiplier, type RuleCard, type Modifier } from "../rules/cards.js";
+import { parseIntent, sanitiseTarget, type Intent } from "./intent.js";
 import { fullSnapshot, staticMap, type SpectatorFrame } from "./snapshot.js";
-import type { StatsStore } from "./stats.js";
+import { roundDecisionQuality } from "./stats.js";
+import type { StatsStore, RoundEntry, RoundQuality } from "./stats.js";
 import type { LogStore } from "./logs.js";
 
 export interface AgentSession {
@@ -21,12 +26,24 @@ export interface AgentSession {
   displayName: string;
   send: (msg: unknown) => void;
   pendingMove: Direction | null;
-  pendingShed: boolean;
   alive: boolean;
   /** Last vision view sent, with its tick and send time (for decision logs). */
   lastView: unknown;
   lastViewTick: number;
   lastSentAt: number;
+  /** Last tick we persisted a decision log for, so a flood of action messages
+   * within a single tick cannot amplify into many DB writes. */
+  lastLoggedTick?: number;
+  /** Optional short, agent-supplied rationale for its latest move (untrusted,
+   * kept for the decision log only). */
+  lastNote?: string | null;
+  /** The agent's declared intent for its latest move (validated enum, untrusted). */
+  lastIntent?: Intent | null;
+  /** The agent's optional sanitised free-text target for its latest move. */
+  lastTarget?: string;
+  /** Server-measured latency (ms) of the most recent action: time from sending
+   * the state to receiving the move. */
+  lastLatencyMs?: number | null;
 }
 
 export interface ArenaHooks {
@@ -35,8 +52,92 @@ export interface ArenaHooks {
 
 const VALID_MOVES = new Set<string>(DIRECTIONS);
 
+/** A live, server-authoritative read on an agent's latest move, for commentary.
+ * `kind` classifies the move; `text` is a short human-readable summary; `says`
+ * is the agent's own (untrusted) rationale if it supplied one. */
+/** Compact rule-card description sent to spectators and agents. */
+export interface RulesPayload {
+  id: string;
+  name: string;
+  brief: string;
+  objective: string;
+  food: string;
+  /** False on "carnivore" rounds where food gives no growth. */
+  food_grows: boolean;
+  /** Food at/above this value is lethal poison this round, if set. */
+  poison_value?: number;
+  /** "zone" objective: the scoring region (board coordinates), if any. */
+  zone?: { x: number; y: number; w: number; h: number };
+  /** "relay" objective: the ordered waypoint cells, if any. */
+  waypoints?: { x: number; y: number }[];
+  /** "bell" objective: the tick the round ends and length is judged, if any. */
+  bell_tick?: number;
+  /** Extra twists layered on the base card this round (may be empty). */
+  modifiers: { id: string; name: string; brief: string }[];
+}
+
+type NoteKind = "safe" | "risky" | "blunder" | "timeout" | "illegal";
+interface AgentNote {
+  id: string;
+  name: string;
+  kind: NoteKind;
+  text: string;
+  /** Structured, varying telemetry for the spectator overlay. */
+  move?: Direction | null;
+  len?: number;
+  /** Reachable free space after the move (capped). */
+  space?: number;
+  /** Enemy heads within striking distance (varies as snakes converge). */
+  threats?: number;
+  /** The agent's own declared intent this tick (validated enum). */
+  intent?: Intent | null;
+  /** The agent's optional sanitised free-text target. */
+  target?: string;
+  /** Whether the declared intent is coherent with the board (server check). */
+  intentOk?: boolean;
+}
+
+/** Per-agent, per-round accumulator for server-authoritative decision quality. */
+interface QualityAcc {
+  moves: number;
+  legal: number;
+  timeouts: number;
+  safeOpp: number;
+  safeChosen: number;
+  spaceSum: number;
+  lastSafeAlt: boolean;
+  avoidableDeath: boolean;
+  latencySum: number;
+  latencyCount: number;
+  /** Moves on which the agent declared a valid intent. */
+  intentDeclared: number;
+  /** Declared-intent moves that were coherent with the board (server check). */
+  intentCoherent: number;
+}
+
+/** Maximum serialised size of decision-log evidence we will persist (16 KB).
+ * Larger payloads are dropped so an authenticated agent cannot bloat the DB. */
+const MAX_EVIDENCE_BYTES = 16 * 1024;
+
+/** Minimum tick denominator for food efficiency, so a snake that grabs a feast
+ * and dies immediately cannot post a perfect growth-per-tick rate. */
+const FOOD_TICK_FLOOR = 50;
+function capEvidence(evidence: unknown): unknown {
+  if (evidence == null) return null;
+  let serialised: string;
+  try {
+    serialised = JSON.stringify(evidence);
+  } catch {
+    return { truncated: true, reason: "unserialisable" };
+  }
+  if (serialised.length > MAX_EVIDENCE_BYTES) {
+    return { truncated: true, reason: "too_large", bytes: serialised.length };
+  }
+  return evidence;
+}
+
 /**
- * Hosts a continuously running arena: rounds of Grid Snake + Territory played in
+ * Hosts a continuously running arena: rounds of SnakeBench played in
  * real time. Connected agents control their own snakes; the lobby is backfilled
  * with NPCs up to a minimum size so a round is always watchable.
  */
@@ -56,6 +157,18 @@ export class Arena {
   private roundHasAgents = false;
   /** snakeId -> account for the agents in the current round (kept across drops). */
   private roundAccounts = new Map<string, string>();
+  /** Agents that connected but were not placed last round (over the per-round
+   * cap). They get priority entry into the next round for fairness. */
+  private queuedLastRound = new Set<string>();
+  /** snakeId -> decision-quality accumulator for the agents in this round. */
+  private roundQuality = new Map<string, QualityAcc>();
+  /** snakeId -> latest server-authoritative move assessment, for spectators. */
+  private liveNotes = new Map<string, AgentNote>();
+  /** snakeId -> kills tally for the current round (for round-end highlights). */
+  private roundKills = new Map<string, { name: string; kills: number }>();
+  /** The rule card in force for the current round (objective, head-to-head, food). */
+  private roundCard: RuleCard = pickRuleCard("init");
+  private roundMods: Modifier[] = [];
   /** Alive-snake count last tick, and the tick it last changed (stall detection). */
   private lastAlive = 0;
   private lastAliveChangeTick = 0;
@@ -63,6 +176,9 @@ export class Arena {
   private currentTickMs = 0;
   private tickTimer: NodeJS.Timeout | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
+  /** Grace window after the first agent joins an ambient lobby, so a burst of
+   * agents arriving together all start in the same round. */
+  private joinTimer: NodeJS.Timeout | null = null;
   private frames: SpectatorFrame[] = [];
   private readonly baseSeed: string;
 
@@ -86,6 +202,11 @@ export class Arena {
     return this.stats ? this.stats.leaderboard() : [];
   }
 
+  /** A single account's stats row (works even outside the top-N board). */
+  statRow(account: string): unknown {
+    return this.stats ? this.stats.rowFor(account) : null;
+  }
+
   start(): void {
     this.startRound();
   }
@@ -93,28 +214,57 @@ export class Arena {
   stop(): void {
     if (this.tickTimer) clearInterval(this.tickTimer);
     if (this.restartTimer) clearTimeout(this.restartTimer);
+    if (this.joinTimer) clearTimeout(this.joinTimer);
     this.tickTimer = null;
     this.restartTimer = null;
+    this.joinTimer = null;
   }
 
   getConfig(): GameConfig {
     return this.config;
   }
 
+  /** Build a spectator frame tagged with the round's objective and kill tally, so
+   * each snake's live `score` reflects how this round is actually won. */
+  private snapshotNow(game: Game): SpectatorFrame {
+    return fullSnapshot(game, {
+      objective: this.roundCard.objective,
+      killsOf: (id) => this.roundKills.get(id)?.kills ?? 0,
+    });
+  }
+
   /** Latest full frame + static map, for a spectator that just connected. */
   currentFrame():
-    | { round: number; world: { width: number; height: number }; obstacles: ReturnType<typeof staticMap>["obstacles"]; frame: SpectatorFrame }
+    | {
+        round: number;
+        world: { width: number; height: number };
+        obstacles: ReturnType<typeof staticMap>["obstacles"];
+        frame: SpectatorFrame;
+        rules: RulesPayload;
+      }
     | null {
     if (!this.game) return null;
     return {
       round: this.round,
       world: { width: this.game.config.width, height: this.game.config.height },
       obstacles: staticMap(this.game).obstacles,
-      frame: fullSnapshot(this.game),
+      frame: this.snapshotNow(this.game),
+      rules: this.rulesPayload(),
     };
   }
 
   // --- agent membership ----------------------------------------------------
+
+  /**
+   * True only when this agent currently has a live snake in an ongoing round.
+   * Agents waiting between rounds (queued mid-round, or defeated and awaiting
+   * the next round) return false, so they are never idle-disconnected.
+   */
+  isAgentLiveInRound(snakeId: string): boolean {
+    if (!this.roundActive || !this.game) return false;
+    if (!this.agents.has(snakeId)) return false;
+    return this.game.snakeById(snakeId)?.alive === true;
+  }
 
   addAgent(session: AgentSession): void {
     const wasEmpty = this.agents.size === 0;
@@ -125,13 +275,20 @@ export class Arena {
 
     // A player round is already running: queue them for the next round rather
     // than disrupting the live match (24/7 fairness). But if the current round
-    // is an ambient NPC-only game, bring the first real agent in immediately.
+    // is an ambient NPC-only game, start a fresh player round after a short
+    // grace window so a burst of agents arriving together all join the same
+    // round (rather than the first one starting a lonely solo round).
     if (wasEmpty) {
       if (this.restartTimer) {
         clearTimeout(this.restartTimer);
         this.restartTimer = null;
       }
-      this.startRound();
+      if (!this.joinTimer) {
+        this.joinTimer = setTimeout(() => {
+          this.joinTimer = null;
+          this.startRound();
+        }, this.serverConfig.joinGraceMs);
+      }
     }
   }
 
@@ -140,16 +297,35 @@ export class Arena {
     // Their snake (if any) simply continues on its last heading until it dies.
   }
 
-  submitAction(snakeId: string, tick: number, move: string, shed = false, evidence: unknown = null): void {
+  submitAction(
+    snakeId: string,
+    tick: number,
+    move: string,
+    evidence: unknown = null,
+    note: string | null = null,
+    intent: unknown = null,
+    target: unknown = null,
+  ): void {
     if (!this.roundActive || !this.game) return;
     const session = this.agents.get(snakeId);
     if (!session) return;
     if (tick !== this.game.tick) return; // stale action
     if (!VALID_MOVES.has(move)) return;
     session.pendingMove = move as Direction;
-    if (shed) session.pendingShed = true;
+    // Server-measured decision latency for this move (state-sent -> action-in).
+    session.lastLatencyMs = session.lastSentAt ? Date.now() - session.lastSentAt : null;
+    // Keep a short, sanitised rationale for the decision log only (untrusted).
+    session.lastNote = note ? note.replace(/\s+/g, " ").trim().slice(0, 120) : null;
+    // Validate the agent's declared intent (enum) and sanitise its free-text
+    // target — both untrusted. Invalid intent is recorded as "undeclared".
+    session.lastIntent = parseIntent(intent);
+    session.lastTarget = sanitiseTarget(target);
 
-    if (this.logs) {
+    // Persist at most one decision log per tick. An agent may legitimately
+    // resubmit (the last move wins, above), but only the first accepted action
+    // for a tick is logged so a message flood cannot bloat the database.
+    if (this.logs && session.lastLoggedTick !== tick) {
+      session.lastLoggedTick = tick;
       this.logs.append({
         ts: Date.now(),
         round: this.round,
@@ -157,10 +333,11 @@ export class Arena {
         account: session.displayName,
         snakeId,
         move,
-        shed,
+        intent: session.lastIntent,
+        target: session.lastTarget ?? null,
         latencyMs: session.lastSentAt ? Date.now() - session.lastSentAt : null,
         view: session.lastViewTick === tick ? session.lastView : null,
-        evidence,
+        evidence: capEvidence(evidence),
       });
     }
   }
@@ -176,18 +353,74 @@ export class Arena {
 
   // --- round lifecycle -----------------------------------------------------
 
+  /** Safe entry point: a failed round start (e.g. an impossible roster) must
+   * never crash the arena — log it and retry rather than throwing out of a
+   * timer callback. */
   private startRound(): void {
+    try {
+      this.beginRound();
+    } catch (err) {
+      console.error(`Round start failed (round ~${this.round + 1}); retrying shortly:`, err);
+      this.roundActive = false;
+      this.game = null;
+      if (this.restartTimer) clearTimeout(this.restartTimer);
+      this.restartTimer = setTimeout(() => this.startRound(), this.serverConfig.roundRestartDelayMs);
+    }
+  }
+
+  private beginRound(): void {
+    if (this.joinTimer) {
+      clearTimeout(this.joinTimer);
+      this.joinTimer = null;
+    }
     this.round += 1;
     const seed = `${this.baseSeed}-r${this.round}`;
 
+    // Apply the per-round agent cap. Agents queued last round get priority, so
+    // nobody is starved when more agents are connected than a round can hold.
+    const all = [...this.agents.values()];
+    const cap = Math.max(1, this.serverConfig.maxAgentsPerRound);
+    const prioritised = [
+      ...all.filter((s) => this.queuedLastRound.has(s.snakeId)),
+      ...all.filter((s) => !this.queuedLastRound.has(s.snakeId)),
+    ];
+    const playing = prioritised.slice(0, cap);
+    const queued = prioritised.slice(cap);
+    this.queuedLastRound = new Set(queued.map((s) => s.snakeId));
+
     const specs: SnakeSpec[] = [];
     this.roundAccounts = new Map();
-    for (const session of this.agents.values()) {
+    this.roundQuality = new Map();
+    this.liveNotes = new Map();
+    this.roundKills = new Map();
+    for (const session of playing) {
       specs.push({ id: session.snakeId, displayName: session.displayName, isNpc: false });
       this.roundAccounts.set(session.snakeId, session.displayName);
+      this.roundQuality.set(session.snakeId, {
+        moves: 0,
+        legal: 0,
+        timeouts: 0,
+        safeOpp: 0,
+        safeChosen: 0,
+        spaceSum: 0,
+        lastSafeAlt: false,
+        avoidableDeath: false,
+        latencySum: 0,
+        latencyCount: 0,
+        intentDeclared: 0,
+        intentCoherent: 0,
+      });
       session.pendingMove = null;
-      session.pendingShed = false;
       session.alive = true;
+    }
+    // Queued agents sit this round out (no snake); mark them not-alive so the
+    // tick loop and idle handling treat them as waiting for the next round.
+    for (const session of queued) {
+      session.pendingMove = null;
+      session.alive = false;
+    }
+    if (queued.length) {
+      console.log(`Round ${this.round}: ${playing.length} agents playing, ${queued.length} queued (cap ${cap}).`);
     }
 
     this.npc = new Map();
@@ -213,29 +446,131 @@ export class Arena {
     const tickMs = ambient ? this.serverConfig.ambientTickMs : this.config.tickDeadlineMs;
     const maxTicks = ambient ? this.serverConfig.ambientMaxTicks : this.config.maxTicks;
 
-    // Size the play-area to the number of snakes in this round.
+    // Draw the rule card for this round (seeded, deterministic) and apply its
+    // mechanical effects: head-to-head rule and food availability.
+    const card = pickRuleCard(seed);
+    this.roundCard = card;
+    const mods = rollModifiers(seed);
+    this.roundMods = mods;
+
+    // Size the play-area to the number of snakes in this round. Combat cards pack
+    // the board tighter (boardScale < 1) to force the encounters that make kills
+    // possible; clamp so even a tight board still fits every (longer) spawn.
     const dims = this.worldForPlayers(specs.length);
-    const roundConfig = { ...this.config, ...dims, tickDeadlineMs: tickMs, maxTicks };
+    const startingLength = card.startingLength ?? this.config.startingLength;
+    const scale = card.boardScale ?? 1;
+    const minSide = Math.max(50, Math.ceil(Math.sqrt(specs.length * (startingLength + 8) * 4)));
+    const width = Math.max(minSide, Math.round(dims.width * scale));
+    const height = Math.max(minSide, Math.round(dims.height * scale));
+    // Base economy/combat from the card, then layer each modifier's overrides.
+    let foodScale = foodMultiplier(card.foodMod);
+    let powerUpTarget = this.config.powerUpTarget;
+    let frenzyDurationTicks = this.config.frenzyDurationTicks;
+    let lengthTaxTicks = card.lengthTaxTicks ?? this.config.lengthTaxTicks;
+    let cutoffAbsorbFraction = card.cutoffAbsorbFraction ?? this.config.cutoffAbsorbFraction;
+    let carcassFoodValue = card.carcassFoodValue ?? this.config.carcassFoodValue;
+    let poisonValue = card.poisonValue;
+    for (const m of mods) {
+      if (m.foodMultiplier != null) foodScale *= m.foodMultiplier;
+      if (m.powerUpTarget != null) powerUpTarget = m.powerUpTarget;
+      if (m.frenzyDurationTicks != null) frenzyDurationTicks = m.frenzyDurationTicks;
+      if (m.lengthTaxTicks != null) lengthTaxTicks = m.lengthTaxTicks;
+      if (m.cutoffAbsorbFraction != null) cutoffAbsorbFraction = m.cutoffAbsorbFraction;
+      if (m.carcassFoodValue != null) carcassFoodValue = m.carcassFoodValue;
+      if (m.poisonValue != null) poisonValue = m.poisonValue;
+    }
+    // Keep food density roughly constant when the board is rescaled.
+    const areaScale = (width * height) / (dims.width * dims.height);
+    const foodTarget = Math.max(20, Math.round(dims.foodTarget * areaScale * foodScale));
+
+    // Generate the round's spatial / timed objective from the seed, so positions
+    // and timing differ every round and can't be hard-coded by an agent.
+    const orng = new Rng(`obj:${seed}`);
+    const margin = 5;
+    let scoreZone: GameConfig["scoreZone"];
+    let waypoints: GameConfig["waypoints"];
+    let bellTick: number | undefined;
+    if (card.objective === "zone") {
+      const zw = Math.max(8, Math.round(width * 0.22));
+      const zh = Math.max(8, Math.round(height * 0.22));
+      scoreZone = {
+        x: margin + orng.int(Math.max(1, width - zw - 2 * margin)),
+        y: margin + orng.int(Math.max(1, height - zh - 2 * margin)),
+        w: zw,
+        h: zh,
+      };
+    } else if (card.objective === "relay") {
+      const count = 6 + orng.int(5);
+      const pts: { x: number; y: number }[] = [];
+      for (let i = 0; i < count; i++) {
+        pts.push({
+          x: margin + orng.int(Math.max(1, width - 2 * margin)),
+          y: margin + orng.int(Math.max(1, height - 2 * margin)),
+        });
+      }
+      waypoints = pts;
+    } else if (card.objective === "bell") {
+      bellTick = Math.min(maxTicks, ambient ? Math.round(maxTicks * 0.7) : 120 + orng.int(120));
+    }
+    const effectiveMaxTicks = bellTick ?? maxTicks;
+
+    const roundConfig = {
+      ...this.config,
+      width,
+      height,
+      foodTarget,
+      headToHead: this.config.headToHead,
+      startingLength,
+      foodGrows: card.foodGrows ?? true,
+      poisonValue,
+      scoreZone,
+      waypoints,
+      bellTick,
+      powerUpTarget,
+      frenzyDurationTicks,
+      lengthTaxTicks,
+      cutoffAbsorbFraction,
+      carcassFoodValue,
+      tickDeadlineMs: tickMs,
+      maxTicks: effectiveMaxTicks,
+    };
 
     this.game = Game.create(specs, seed, roundConfig);
-    this.frames = [fullSnapshot(this.game)];
+    // Special prizes (e.g. golden apple) spawn after the board is built.
+    for (const m of mods) {
+      if (m.specialFood) this.game.addSpecialFood(m.specialFood.value, m.specialFood.count);
+    }
+    this.frames = [this.snapshotNow(this.game)];
     this.roundActive = true;
     this.lastAlive = specs.length;
     this.lastAliveChangeTick = 0;
 
-    const world = { width: dims.width, height: dims.height };
+    const world = { width, height };
     const obstacles = staticMap(this.game).obstacles;
-    for (const session of this.agents.values()) {
+    const rules = this.rulesPayload();
+    for (const session of playing) {
       session.send({
         type: "round_start",
         round: this.round,
         you_id: session.snakeId,
         world,
         obstacles,
-        tick_deadline_ms: this.config.tickDeadlineMs,
+        tick_deadline_ms: tickMs,
+        rules,
       });
     }
-    this.hooks.broadcastSpectators({ type: "round_start", round: this.round, world, obstacles });
+    // Tell queued agents they are waiting, with their position in the queue.
+    queued.forEach((session, idx) => {
+      session.send({
+        type: "queued",
+        round: this.round,
+        position: idx + 1,
+        queued: queued.length,
+        cap,
+        reason: "round_full",
+      });
+    });
+    this.hooks.broadcastSpectators({ type: "round_start", round: this.round, world, obstacles, rules });
     this.sendStateToAgents();
 
     // (Re)create the tick timer only when the cadence changes between rounds.
@@ -251,12 +586,10 @@ export class Arena {
     const game = this.game;
 
     const moves = new Map<string, Direction>();
-    const sheds = new Set<string>();
     for (const snake of game.aliveSnakes()) {
       const agent = this.agents.get(snake.id);
       if (agent) {
         if (agent.pendingMove) moves.set(snake.id, agent.pendingMove);
-        if (agent.pendingShed) sheds.add(snake.id);
         continue;
       }
       const npc = this.npc.get(snake.id);
@@ -265,12 +598,22 @@ export class Arena {
       }
     }
 
-    game.step(moves, sheds);
+    this.recordDecisionQuality(game);
+
+    const events = game.step(moves);
+
+    // Tally head-to-head kills for round-end highlights.
+    for (const e of events) {
+      if (e.kind === "kill") {
+        const k = this.roundKills.get(e.id) ?? { name: e.displayName, kills: 0 };
+        k.kills += 1;
+        this.roundKills.set(e.id, k);
+      }
+    }
 
     // Reset agent intents; a missed next tick means "continue current heading".
     for (const session of this.agents.values()) {
       session.pendingMove = null;
-      session.pendingShed = false;
     }
 
     // Notify any agents whose snake just died.
@@ -278,6 +621,9 @@ export class Arena {
       const snake = game.snakeById(session.snakeId);
       if (snake && !snake.alive && session.alive) {
         session.alive = false;
+        // A death is "avoidable" if a safe move existed on the final decision.
+        const acc = this.roundQuality.get(session.snakeId);
+        if (acc && acc.lastSafeAlt) acc.avoidableDeath = true;
         session.send({ type: "dead", tick: game.tick, peak_size: snake.peakSize });
       }
     }
@@ -289,13 +635,181 @@ export class Arena {
       this.lastAliveChangeTick = game.tick;
     }
 
-    const frame = fullSnapshot(game);
+    // Drop commentary for snakes that have died, so the overlay stays current.
+    for (const id of [...this.liveNotes.keys()]) {
+      if (!game.snakeById(id)?.alive) this.liveNotes.delete(id);
+    }
+
+    const frame = this.snapshotNow(game);
     this.frames.push(frame);
-    this.hooks.broadcastSpectators({ type: "frame", frame });
+    this.hooks.broadcastSpectators({
+      type: "frame",
+      frame,
+      events,
+      notes: [...this.liveNotes.values()],
+    });
     this.sendStateToAgents();
 
     const reason = this.endReason(game);
     if (reason) this.endRound(reason);
+  }
+
+  /** Manhattan distance from a cell to the nearest food, or Infinity if none. */
+  private nearestFoodDist(game: Game, c: Cell): number {
+    let best = Infinity;
+    for (const k of game.food.keys()) {
+      const comma = k.indexOf(",");
+      const fx = Number(k.slice(0, comma));
+      const fy = Number(k.slice(comma + 1));
+      const d = Math.abs(fx - c.x) + Math.abs(fy - c.y);
+      if (d < best) {
+        best = d;
+        if (best <= 1) break;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Server-authoritative decision-quality sampling, run each tick *before* the
+   * step using the move each agent actually submitted. Judges the move against
+   * the real board (never the agent's self-reported evidence).
+   */
+  private recordDecisionQuality(game: Game): void {
+    if (this.roundQuality.size === 0) return;
+    // Body cells that persist next tick: every alive snake's body except its
+    // tail (tails vacate). Shared across all agents this tick.
+    const blocked = new Set<string>();
+    const allHeads: Array<{ id: string; head: Cell; heading: Direction; length: number }> = [];
+    for (const s of game.snakes) {
+      if (!s.alive) continue;
+      for (let i = 0; i < s.body.length - 1; i++) blocked.add(cellKey(s.body[i]!));
+      allHeads.push({ id: s.id, head: s.body[0]!, heading: s.heading, length: s.body.length });
+    }
+    for (const [snakeId, acc] of this.roundQuality) {
+      const snake = game.snakeById(snakeId);
+      if (!snake || !snake.alive) continue;
+      const session = this.agents.get(snakeId);
+      const ctx: MoveContext = {
+        width: game.config.width,
+        height: game.config.height,
+        obstacles: game.obstacles,
+        blocked,
+        head: snake.body[0]!,
+        heading: snake.heading,
+        submittedMove: session?.pendingMove ?? null,
+        selfLength: snake.body.length,
+        enemyHeads: allHeads
+          .filter((h) => h.id !== snakeId)
+          .map((h) => ({ head: h.head, heading: h.heading, length: h.length })),
+        headToHead: this.config.headToHead,
+      };
+      const a = analyseMove(ctx);
+      acc.moves += 1;
+      if (a.legal) acc.legal += 1;
+      if (a.timeout) acc.timeouts += 1;
+      if (a.hadSafeAlternative) {
+        acc.safeOpp += 1;
+        if (a.choseSafe) acc.safeChosen += 1;
+      }
+      acc.spaceSum += a.spaceAfter;
+      acc.lastSafeAlt = a.hadSafeAlternative;
+      if (session?.pendingMove != null && session.lastLatencyMs != null) {
+        acc.latencySum += session.lastLatencyMs;
+        acc.latencyCount += 1;
+      }
+
+      // Server-authoritative move classification for the overlay colour (never
+      // trusts the agent's own words for this).
+      const move = session?.pendingMove ?? null;
+      const head = snake.body[0]!;
+      const len = snake.body.length;
+      // Local pressure + nearest rival. Any rival is a potential cut-off target
+      // (you kill by trapping them, not by out-sizing them), so the nearest enemy
+      // head is the hunt target. Used for the overlay and the intent cross-check.
+      let threats = 0;
+      let nearestEnemy = Infinity;
+      let huntCell: Cell | null = null;
+      let huntDist = Infinity;
+      for (const h of allHeads) {
+        if (h.id === snakeId) continue;
+        const d = Math.abs(h.head.x - head.x) + Math.abs(h.head.y - head.y);
+        if (d <= 4) threats += 1;
+        if (d < nearestEnemy) nearestEnemy = d;
+        if (d < huntDist) {
+          huntDist = d;
+          huntCell = h.head;
+        }
+      }
+      const nh = move ? { x: head.x + DELTA[move].x, y: head.y + DELTA[move].y } : head;
+      const foodNow = this.nearestFoodDist(game, head);
+      const foodNext = move ? this.nearestFoodDist(game, nh) : foodNow;
+
+      let kind: NoteKind;
+      if (a.timeout) kind = "timeout";
+      else if (!a.legal) kind = "illegal";
+      else if (!a.choseSafe && a.hadSafeAlternative) kind = "blunder";
+      else if (!a.choseSafe) kind = "risky";
+      else kind = "safe";
+
+      // Cross-check the agent's *declared* intent against the real board. We do
+      // not act on the intent; this is purely a "does what it said match what it
+      // did" reasoning signal, surfaced to spectators and the agent's summary.
+      const declared = session?.lastIntent ?? null;
+      let intentOk: boolean | undefined;
+      if (declared) {
+        switch (declared) {
+          case "feeding":
+            intentOk = foodNext < foodNow || foodNow === 0;
+            break;
+          case "hunting":
+            intentOk = huntCell != null && Math.abs(nh.x - huntCell.x) + Math.abs(nh.y - huntCell.y) < huntDist;
+            break;
+          case "evading":
+            intentOk = (threats > 0 || nearestEnemy <= 6) && a.choseSafe;
+            break;
+          case "escaping":
+            intentOk = a.spaceAfter < Math.max(8, len * 2);
+            break;
+          case "roaming":
+            intentOk = threats === 0;
+            break;
+        }
+      }
+
+      const room = `${a.spaceAfter}${a.spaceAfter >= SPACE_CAP ? "+" : ""}`;
+      const fallback =
+        kind === "timeout"
+          ? `timed out — drifting ${snake.heading}`
+          : kind === "illegal"
+            ? `illegal move — held ${snake.heading}`
+            : kind === "blunder"
+              ? `${move} into danger — a safe move existed`
+              : kind === "risky"
+                ? `${move} — no safe move`
+                : threats > 0
+                  ? `${move} · ${threats} near · room ${room}`
+                  : `${move} · room ${room}`;
+
+      if (declared) {
+        acc.intentDeclared += 1;
+        if (intentOk) acc.intentCoherent += 1;
+      }
+
+      this.liveNotes.set(snakeId, {
+        id: snakeId,
+        name: snake.displayName,
+        kind,
+        text: fallback,
+        move,
+        len,
+        space: a.spaceAfter,
+        threats,
+        intent: declared,
+        target: session?.lastTarget,
+        intentOk,
+      });
+    }
   }
 
   /** Number of currently-connected agents whose snake is still alive. */
@@ -325,9 +839,30 @@ export class Arena {
     return null;
   }
 
+  /** Compact, machine-readable description of the active rule card, sent to
+   * agents (so they can adapt) and spectators (so they can follow along). */
+  private rulesPayload(): RulesPayload {
+    const c = this.roundCard;
+    const cfg = this.game?.config;
+    return {
+      id: c.id,
+      name: c.name,
+      brief: c.brief,
+      objective: c.objective,
+      food: c.foodMod,
+      food_grows: cfg?.foodGrows ?? true,
+      poison_value: cfg?.poisonValue,
+      zone: cfg?.scoreZone,
+      waypoints: cfg?.waypoints,
+      bell_tick: cfg?.bellTick,
+      modifiers: this.roundMods.map((m) => ({ id: m.id, name: m.name, brief: m.brief })),
+    };
+  }
+
   private sendStateToAgents(): void {
     if (!this.game) return;
-    const deadline = Date.now() + this.config.tickDeadlineMs;
+    const deadline = Date.now() + this.game.config.tickDeadlineMs;
+    const rules = this.rulesPayload();
     for (const session of this.agents.values()) {
       const snake = this.game.snakeById(session.snakeId);
       if (!snake || !snake.alive) continue;
@@ -335,7 +870,7 @@ export class Arena {
       session.lastView = view;
       session.lastViewTick = this.game.tick;
       session.lastSentAt = Date.now();
-      session.send({ type: "state", state: view });
+      session.send({ type: "state", state: view, rules });
     }
   }
 
@@ -343,37 +878,193 @@ export class Arena {
     if (!this.game) return;
     this.roundActive = false;
 
-    const standings = [...this.game.snakes]
-      .sort((a, b) => b.peakSize - a.peakSize)
-      .map((s, idx) => ({
-        rank: idx + 1,
-        id: s.id,
-        display_name: s.displayName,
-        is_npc: s.isNpc,
-        peak_size: s.peakSize,
-        died_at_tick: s.diedAtTick,
-      }));
+    // Rank according to the round's rule card objective. Snakes still alive at
+    // round end outrank those who died; remaining ties fall back to peak size.
+    //  - survive: later death ranks higher.
+    //  - grow:    largest peak length.
+    //  - kills:   most cut-off kills.
+    //  - zone:    most ticks spent inside the scoring zone.
+    //  - relay:   most waypoints reached, in order.
+    //  - bell:    alive and LONGEST at the bell tick.
+    //  - fasting: survive long while staying SHORT (shortest wins).
+    const objective = this.roundCard.objective;
+    const endTick = this.game.tick;
+    const deathOrder = (d: number | null): number => d ?? Number.POSITIVE_INFINITY;
+    const killsOf = (id: string): number => this.roundKills.get(id)?.kills ?? 0;
+    type Ranked = {
+      snake: Snake;
+      diedAtTick: number | null;
+      peakSize: number;
+      length: number;
+      zoneTicks: number;
+      waypoints: number;
+      kills: number;
+    };
+    const ranked: Ranked[] = this.game.snakes.map((s) => ({
+      snake: s,
+      diedAtTick: s.diedAtTick,
+      peakSize: s.peakSize,
+      length: s.body.length,
+      zoneTicks: s.zoneTicks,
+      waypoints: s.waypointIndex,
+      kills: killsOf(s.id),
+    }));
+    const aliveFirst = (a: Ranked, b: Ranked): number => deathOrder(b.diedAtTick) - deathOrder(a.diedAtTick);
+    const comparator = (a: Ranked, b: Ranked): number => {
+      switch (objective) {
+        case "grow": return b.peakSize - a.peakSize || aliveFirst(a, b);
+        case "kills": return b.kills - a.kills || aliveFirst(a, b) || b.peakSize - a.peakSize;
+        case "zone": return b.zoneTicks - a.zoneTicks || aliveFirst(a, b) || b.peakSize - a.peakSize;
+        case "relay": return b.waypoints - a.waypoints || aliveFirst(a, b) || b.peakSize - a.peakSize;
+        case "bell": return aliveFirst(a, b) || b.length - a.length;
+        case "fasting": return aliveFirst(a, b) || a.length - b.length;
+        default: return aliveFirst(a, b) || b.peakSize - a.peakSize;
+      }
+    };
+    const scoreOf = (r: Ranked): number => {
+      switch (objective) {
+        case "zone": return r.zoneTicks;
+        case "relay": return r.waypoints;
+        case "bell": return r.length;
+        case "kills": return r.kills;
+        case "grow": return r.peakSize;
+        case "fasting": return r.length;
+        default: return r.diedAtTick ?? endTick;
+      }
+    };
+    ranked.sort(comparator);
+    const standings = ranked.map((r, idx) => ({
+      rank: idx + 1,
+      id: r.snake.id,
+      display_name: r.snake.displayName,
+      is_npc: r.snake.isNpc,
+      peak_size: r.peakSize,
+      died_at_tick: r.diedAtTick,
+      kills: r.kills,
+      score: scoreOf(r),
+    }));
 
-    for (const session of this.agents.values()) {
-      session.send({ type: "round_end", round: this.round, reason, standings });
+    // Round-end highlights for spectators: the longest survivor (rank 1) and the
+    // round's deadliest snake (most head-to-head kills), if any.
+    const winner = standings[0];
+    let topKiller: { name: string; kills: number } | null = null;
+    for (const k of this.roundKills.values()) {
+      if (!topKiller || k.kills > topKiller.kills) topKiller = { name: k.name, kills: k.kills };
     }
-    this.hooks.broadcastSpectators({ type: "round_end", round: this.round, reason, standings });
+    const highlights = {
+      survivor: winner
+        ? { name: winner.display_name, ticks: winner.died_at_tick ?? this.game.tick, is_npc: winner.is_npc }
+        : null,
+      topKiller: topKiller && topKiller.kills > 0 ? topKiller : null,
+    };
+
+    this.hooks.broadcastSpectators({
+      type: "round_end",
+      round: this.round,
+      reason,
+      standings,
+      highlights,
+      rules: this.rulesPayload(),
+      next_round_in_ms: this.serverConfig.roundRestartDelayMs,
+    });
+
+    // Per-snake round summary (quality + rank), returned to each agent below.
+    const summary = new Map<
+      string,
+      { quality: RoundQuality; rank: number; fieldSize: number; intentRate: number; intentCoherentRate: number }
+    >();
+    const deltaByAccount = new Map<string, number>();
 
     // Persist per-account benchmark stats for the agent participants.
     if (this.stats) {
-      const entries = standings
+      const stats = this.stats;
+      const game = this.game;
+      const fieldSize = standings.length;
+      const startingLength = this.config.startingLength;
+
+      // Build the rating field: real agents at their current rating, NPCs at
+      // their fixed anchor. Expand standings into pairwise Glicko-2 results.
+      const ratingField = standings.map((s) => {
+        if (s.is_npc) {
+          const kind = this.npc.get(s.id)?.kind;
+          const anchor = (kind && NPC_ANCHOR[kind]) || { rating: DEFAULT_RATING, rd: DEFAULT_RD };
+          return { id: s.id, rank: s.rank, rating: anchor.rating, rd: anchor.rd };
+        }
+        const account = this.roundAccounts.get(s.id)!;
+        const r = stats.getRating(account);
+        return { id: s.id, rank: s.rank, rating: r.rating, rd: r.rd };
+      });
+      const pairwise = expandStandings(ratingField);
+
+      const entries: RoundEntry[] = standings
         .filter((s) => !s.is_npc && this.roundAccounts.has(s.id))
-        .map((s) => ({
-          account: this.roundAccounts.get(s.id)!,
-          rank: s.rank,
-          peakSize: s.peak_size,
-        }));
+        .map((s) => {
+          const acc = this.roundQuality.get(s.id);
+          const snake = game.snakeById(s.id);
+          const survival = snake?.diedAtTick ?? game.tick;
+          const growth = Math.max(0, (snake?.peakSize ?? startingLength) - startingLength);
+          const quality: RoundQuality = {
+            moves: acc?.moves ?? 0,
+            legalRate: acc && acc.moves ? acc.legal / acc.moves : 1,
+            safeRate: acc && acc.safeOpp ? acc.safeChosen / acc.safeOpp : 1,
+            avoidableDeath: acc?.avoidableDeath ? 1 : 0,
+            avgSpace: acc && acc.moves ? acc.spaceSum / acc.moves : 0,
+            foodPerTick: growth / Math.max(survival, FOOD_TICK_FLOOR),
+            timeoutRate: acc && acc.moves ? acc.timeouts / acc.moves : 0,
+            survivalTicks: survival,
+            latencyMs: acc && acc.latencyCount ? acc.latencySum / acc.latencyCount : 0,
+          };
+          const intentRate = acc && acc.moves ? acc.intentDeclared / acc.moves : 0;
+          const intentCoherentRate = acc && acc.intentDeclared ? acc.intentCoherent / acc.intentDeclared : 0;
+          summary.set(s.id, { quality, rank: s.rank, fieldSize, intentRate, intentCoherentRate });
+          return {
+            account: this.roundAccounts.get(s.id)!,
+            rank: s.rank,
+            peakSize: s.peak_size,
+            fieldSize,
+            quality,
+            ratingResults: pairwise.get(s.id) ?? [],
+          };
+        });
       if (entries.length) {
+        // Snapshot conservative ratings before applying, to report the change.
+        const before = new Map<string, number>();
+        for (const e of entries) {
+          const row = stats.rowFor(e.account);
+          if (row) before.set(e.account, row.conservativeRating);
+        }
         this.stats.recordRound(this.round, entries);
+        const deltas = entries.map((e) => {
+          const after = stats.rowFor(e.account)?.conservativeRating ?? 0;
+          const prev = before.get(e.account);
+          const delta = prev == null ? 0 : Math.round(after - prev);
+          deltaByAccount.set(e.account, delta);
+          return { account: e.account, delta };
+        });
         const board = this.stats.leaderboard();
-        for (const session of this.agents.values()) session.send({ type: "leaderboard", board });
-        this.hooks.broadcastSpectators({ type: "leaderboard", board });
+        for (const session of this.agents.values()) session.send({ type: "leaderboard", board, deltas });
+        this.hooks.broadcastSpectators({ type: "leaderboard", board, deltas });
       }
+    }
+
+    // Return each agent its own round_end, enriched with a server-authoritative
+    // breakdown of how it played (quality metrics + composite + rating change).
+    for (const session of this.agents.values()) {
+      const s = summary.get(session.snakeId);
+      const account = session.displayName;
+      const your = s
+        ? {
+            rank: s.rank,
+            field_size: s.fieldSize,
+            decision_quality: roundDecisionQuality(s.quality),
+            rating: this.stats?.rowFor(account)?.conservativeRating ?? null,
+            rating_delta: deltaByAccount.get(account) ?? 0,
+            intent_rate: Math.round(s.intentRate * 100),
+            intent_coherent_rate: Math.round(s.intentCoherentRate * 100),
+            metrics: s.quality,
+          }
+        : null;
+      session.send({ type: "round_end", round: this.round, reason, standings, your });
     }
 
     this.saveReplay(standings);

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Grid Snake — Account</title>
+    <title>SnakeBench — Account</title>
     <style>
       * { box-sizing: border-box; }
       body {
@@ -51,13 +51,22 @@
         word-break: break-all; margin-top: 8px;
       }
       .hidden { display: none; }
+      .steps { margin: 0; padding-left: 20px; }
+      .steps li { margin: 4px 0; }
+      .copybtn { padding: 5px 12px; margin-left: 8px; }
+      .keywrap { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+      .keywrap .key { margin-top: 0; flex: 1 1 320px; }
       .muted { color: #6f97ae; }
       .err { color: #ff9b9b; }
       .ok { color: #7fd6a0; }
       .stats { display: flex; gap: 22px; flex-wrap: wrap; }
       .stat { text-align: center; }
       .stat b { display: block; font-size: 26px; color: #5fd0ff; font-variant-numeric: tabular-nums; }
+      .stat b small { font-size: 14px; color: #f0b760; vertical-align: super; }
       .stat span { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #8fb6cd; }
+      .submetrics { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 14px;
+        padding-top: 12px; border-top: 1px solid rgba(120,180,220,0.12); font-size: 12px; color: #9fc6dc; }
+      .submetrics b { color: #cfe6f4; font-variant-numeric: tabular-nums; }
       table { border-collapse: collapse; width: 100%; font-size: 13px; }
       th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid rgba(120,180,220,0.1); }
       th { color: #8fb6cd; font-weight: 600; }
@@ -71,6 +80,7 @@
       <div class="nav">
         <a href="/">Spectator</a>
         <a href="/guide.html">How to play</a>
+        <a href="/faq.html">Rules &amp; FAQ</a>
         <a href="#" id="logoutLink" class="hidden">Sign out</a>
       </div>
     </header>
@@ -78,13 +88,18 @@
     <main>
       <!-- Signed out -->
       <div class="card" id="loginCard">
-        <h2>Sign in</h2>
-        <p class="muted">Sign in with Google to create an account, manage your agent API keys, and review your benchmark stats and decision logs.</p>
-        <p><a class="gbtn" id="googleBtn" href="/auth/google">
-          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.3l7.9 6.1C12.4 13.2 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.5 3-2.2 5.5-4.7 7.2l7.3 5.7C43.9 38 46.5 31.8 46.5 24.5z"/><path fill="#FBBC05" d="M10.5 28.6c-.5-1.5-.8-3-.8-4.6s.3-3.1.8-4.6l-7.9-6.1C1 16.5 0 20.1 0 24s1 7.5 2.6 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.3 0 11.6-2.1 15.5-5.7l-7.3-5.7c-2 1.4-4.7 2.3-8.2 2.3-6.3 0-11.6-3.7-13.5-9.1l-7.9 6.1C6.5 42.6 14.6 48 24 48z"/></svg>
-          Sign in with Google
-        </a></p>
-        <p class="muted" id="oauthHint"></p>
+        <h2>Sign in or sign up</h2>
+        <p class="muted">Continue with Google to manage your agent API keys and review your benchmark stats and decision logs. <b>There is no separate sign-up</b> — your account is created automatically the first time you continue with Google.</p>
+        <div id="googleWrap">
+          <p><a class="gbtn" id="googleBtn" href="/auth/google">
+            <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.3l7.9 6.1C12.4 13.2 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.5 3-2.2 5.5-4.7 7.2l7.3 5.7C43.9 38 46.5 31.8 46.5 24.5z"/><path fill="#FBBC05" d="M10.5 28.6c-.5-1.5-.8-3-.8-4.6s.3-3.1.8-4.6l-7.9-6.1C1 16.5 0 20.1 0 24s1 7.5 2.6 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.3 0 11.6-2.1 15.5-5.7l-7.3-5.7c-2 1.4-4.7 2.3-8.2 2.3-6.3 0-11.6-3.7-13.5-9.1l-7.9 6.1C6.5 42.6 14.6 48 24 48z"/></svg>
+            Continue with Google
+          </a></p>
+        </div>
+        <div id="oauthUnavailable" class="hidden">
+          <p class="err">Google sign-in is not configured on this server, so accounts cannot be created here yet.</p>
+          <p class="muted">The administrator needs to set <span class="mono">GOOGLE_CLIENT_ID</span>, <span class="mono">GOOGLE_CLIENT_SECRET</span> and <span class="mono">OAUTH_REDIRECT_BASE</span> (a real Google OAuth client). For local testing without sign-in, an agent can connect with a static key — see the <a href="/guide.html">agent guide</a>.</p>
+        </div>
       </div>
 
       <!-- Signed in -->
@@ -103,7 +118,16 @@
 
       <div class="card hidden" id="statsCard">
         <h2>All-time stats</h2>
-        <div class="stats" id="stats"></div>
+        <div id="stats"></div>
+      </div>
+
+      <div class="card hidden" id="quickstartCard">
+        <h2>Getting started</h2>
+        <ol class="steps">
+          <li><b>Sign in</b> with Google (done).</li>
+          <li><b>Create an API key</b> below and copy it — it is shown only once.</li>
+          <li><b>Point your agent at the arena</b> using the key in an <span class="mono">Authorization</span> header.</li>
+        </ol>
       </div>
 
       <div class="card hidden" id="keysCard">
@@ -112,7 +136,9 @@
         </h2>
         <div id="keyOut"></div>
         <table id="keysTable"><thead><tr><th>Key</th><th>Label</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody></tbody></table>
-        <p class="muted">Agents connect with <span class="mono">ws://&lt;host&gt;/agent?key=YOUR_KEY</span>. Keys are stored hashed; we can never show a key again after creation.</p>
+        <p class="muted">Keys are stored hashed; we can never show a key again after creation. See the <a href="/guide.html">agent guide</a> for the full protocol.</p>
+        <label style="margin-top:14px">Connect your agent (WebSocket)</label>
+        <div class="key" id="connectSnippet"></div>
       </div>
 
       <div class="card hidden" id="logsCard">
@@ -141,29 +167,82 @@
         showLoggedIn(me.data);
       }
 
+      const CARDS = ["profileCard", "statsCard", "quickstartCard", "keysCard", "logsCard"];
+
       function showLoggedOut() {
         $("loginCard").classList.remove("hidden");
-        for (const id of ["profileCard", "statsCard", "keysCard", "logsCard"]) $(id).classList.add("hidden");
+        for (const id of CARDS) $(id).classList.add("hidden");
         $("logoutLink").classList.add("hidden");
       }
 
       function showLoggedIn(me) {
         $("loginCard").classList.add("hidden");
-        for (const id of ["profileCard", "statsCard", "keysCard", "logsCard"]) $(id).classList.remove("hidden");
+        for (const id of CARDS) $(id).classList.remove("hidden");
         $("logoutLink").classList.remove("hidden");
         $("name").value = me.account;
         $("email").textContent = me.email ? `Signed in as ${me.email}` : "";
         renderStats(me.stats);
         renderKeys(me.keys || []);
+        renderConnectSnippet();
         loadLogs();
       }
 
+      // Concrete WebSocket endpoint for this deployment (key passed as a header).
+      function wsBase() {
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        return `${proto}://${location.host}/agent`;
+      }
+
+      function renderConnectSnippet() {
+        $("connectSnippet").textContent =
+          `${wsBase()}\nHeader:  Authorization: Bearer YOUR_KEY`;
+      }
+
+      async function copyText(text, btn) {
+        try {
+          await navigator.clipboard.writeText(text);
+          const old = btn.textContent;
+          btn.textContent = "Copied";
+          setTimeout(() => { btn.textContent = old; }, 1500);
+        } catch {
+          btn.textContent = "Copy failed";
+        }
+      }
+
       function renderStats(s) {
-        const stat = (label, val) => `<div class="stat"><b>${val}</b><span>${label}</span></div>`;
-        $("stats").innerHTML = s
-          ? stat("games won", s.wins) + stat("max size", s.maxSize) + stat("games", s.gamesPlayed) +
-            stat("avg size", (s.avgSize || 0).toFixed(0))
-          : `<p class="muted">No completed rounds yet — connect an agent and play a round.</p>`;
+        if (!s) {
+          $("stats").innerHTML = `<p class="muted">No completed rounds yet — connect an agent and play a round.</p>`;
+          return;
+        }
+        const stat = (label, val, title) =>
+          `<div class="stat"${title ? ` title="${title}"` : ""}><b>${val}</b><span>${label}</span></div>`;
+        const pct = (v) => `${Math.round((v || 0) * 100)}%`;
+        const rating = Math.round(s.conservativeRating ?? 0);
+        const ratingVal = s.provisional ? `${rating}<small>?</small>` : `${rating}`;
+        const quality = s.decisionQuality == null ? "—" : s.decisionQuality;
+
+        const headline =
+          stat("skill rating", ratingVal, s.provisional ? "Provisional — play more rounds to confirm" : "Opponent-aware Glicko-2 rating") +
+          stat("decision quality", quality, "0-100, measured server-side from your actual moves") +
+          stat("win rate", pct(s.winRate)) +
+          stat("games", s.gamesPlayed);
+
+        // Decision-quality sub-metrics (the "why" behind the quality score).
+        const sub = s.decisionQuality == null
+          ? ""
+          : `<div class="submetrics">` +
+            `<span>Safe moves <b>${pct(s.safeRate)}</b></span>` +
+            `<span>Avoidable deaths <b>${pct(s.avoidableRate)}</b></span>` +
+            `<span>Avg space <b>${(s.spaceAvg || 0).toFixed(0)}</b></span>` +
+            `<span>Growth/tick <b>${(s.foodRate || 0).toFixed(2)}</b></span>` +
+            `<span>Timeouts <b>${pct(s.timeoutRate)}</b></span>` +
+            `<span>Avg survival <b>${(s.survivalAvg || 0).toFixed(0)} ticks</b></span>` +
+            `<span>Avg latency <b>${s.latencyMs ? Math.round(s.latencyMs) + " ms" : "—"}</b></span>` +
+            `</div>`;
+
+        $("stats").innerHTML =
+          `<div class="stats">${headline}</div>` + sub +
+          `<p class="muted" style="margin-top:10px">Skill rating is opponent-aware and volume-proof; decision quality is judged from the real board, not your submitted notes. Both reward playing better, not more. Also: best size ${s.maxSize}, avg size ${(s.avgSize || 0).toFixed(0)}.</p>`;
       }
 
       function renderKeys(keys) {
@@ -183,7 +262,11 @@
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }),
         });
         if (!ok) { $("keyOut").innerHTML = `<p class="err">${esc(data.error || "Failed")}</p>`; return; }
-        $("keyOut").innerHTML = `<p class="ok">New key — copy it now, it will not be shown again:</p><div class="key">${esc(data.key)}</div>`;
+        $("keyOut").innerHTML =
+          `<p class="ok">New key — copy it now, it will not be shown again:</p>` +
+          `<div class="keywrap"><div class="key" id="freshKey">${esc(data.key)}</div>` +
+          `<button class="primary copybtn" id="copyKey">Copy</button></div>`;
+        $("copyKey").onclick = (e) => copyText(data.key, e.currentTarget);
         refreshKeys();
       }
 
@@ -236,8 +319,16 @@
       $("del").onclick = delLogs;
       $("logoutLink").onclick = logout;
 
-      // If Google isn't configured, the button 503s; hint the user.
-      fetch("/auth/google", { method: "HEAD" }).catch(() => {});
+      // Show the right sign-in state: a working Google button only when OAuth is
+      // actually configured, otherwise a clear "not configured" message.
+      async function applyAuthStatus() {
+        const { ok, data } = await api("/api/auth/status");
+        const configured = ok && data.google;
+        $("googleWrap").classList.toggle("hidden", !configured);
+        $("oauthUnavailable").classList.toggle("hidden", configured);
+      }
+
+      applyAuthStatus();
       load();
     </script>
   </body>
