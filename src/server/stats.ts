@@ -23,6 +23,11 @@ export interface RoundQuality {
   survivalTicks: number;
   /** Mean server-measured decision latency (ms) over the round, 0 if unknown. */
   latencyMs: number;
+  /** Moves made this round while a law was in force. */
+  lawMoves: number;
+  /** Law-aware safe-rate over those law-round moves (0..1) — the agent's
+   * law-comprehension. null when this round had no laws (nothing to measure). */
+  lawComprehension: number | null;
 }
 
 export interface RoundEntry {
@@ -55,6 +60,9 @@ interface AccountStat {
   survivalAvg: number;
   placementAvg: number;
   latencyAvg: number;
+  // Law comprehension, averaged over law rounds only (lawGames is the denominator).
+  lawGames: number;
+  lawComprehension: number;
 }
 
 /** Decision-quality composite weights (documented; sum to 1.0). */
@@ -107,6 +115,9 @@ export interface LeaderRow {
   timeoutRate: number;
   survivalAvg: number;
   latencyMs: number;
+  /** Law-comprehension rate (0..1) averaged over law rounds, or null if the
+   * account has not yet played a round with a law. */
+  lawComprehension: number | null;
 }
 
 /**
@@ -138,6 +149,8 @@ export class StatsStore {
       survival_avg: string | null;
       placement_avg: string | null;
       latency_avg: string | null;
+      law_games: string | null;
+      law_rate: string | null;
     }>(
       `SELECT display_name,
               count(*)                                  AS games,
@@ -155,6 +168,8 @@ export class StatsStore {
               avg(q_timeout_rate)                       AS timeout_rate,
               avg(survival_ticks)                       AS survival_avg,
               avg(q_latency_ms)                         AS latency_avg,
+              count(q_law_rate)                         AS law_games,
+              avg(q_law_rate)                           AS law_rate,
               avg((field_size - rank)::float / NULLIF(field_size - 1, 0)) AS placement_avg
        FROM round_results
        GROUP BY display_name`,
@@ -197,6 +212,8 @@ export class StatsStore {
         survivalAvg: num(row.survival_avg),
         placementAvg: num(row.placement_avg),
         latencyAvg: num(row.latency_avg),
+        lawGames: Number(row.law_games ?? 0),
+        lawComprehension: num(row.law_rate),
       });
     }
   }
@@ -229,6 +246,8 @@ export class StatsStore {
         survivalAvg: 0,
         placementAvg: 0,
         latencyAvg: 0,
+        lawGames: 0,
+        lawComprehension: 0,
       };
       this.data.set(account, s);
     }
@@ -272,6 +291,12 @@ export class StatsStore {
       s.placementAvg = avg(s.placementAvg, placement);
       s.latencyAvg = avg(s.latencyAvg, e.quality.latencyMs);
       s.qGames = n + 1;
+
+      // Law comprehension is averaged only over rounds that actually had a law.
+      if (e.quality.lawComprehension != null) {
+        s.lawComprehension = (s.lawComprehension * s.lawGames + e.quality.lawComprehension) / (s.lawGames + 1);
+        s.lawGames += 1;
+      }
     }
     void this.persist(round, entries);
   }
@@ -284,8 +309,8 @@ export class StatsStore {
            `INSERT INTO round_results
              (round, user_id, display_name, rank, peak_size, field_size, survival_ticks,
               q_moves, q_legal_rate, q_safe_rate, q_avoidable, q_space, q_food_rate, q_timeout_rate,
-              q_latency_ms)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+              q_latency_ms, q_law_rate)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
           [
             round,
             userId,
@@ -302,6 +327,7 @@ export class StatsStore {
             e.quality.foodPerTick,
             e.quality.timeoutRate,
             e.quality.latencyMs,
+            e.quality.lawComprehension,
           ],
         );
         const s = this.data.get(e.account)!;
@@ -355,6 +381,7 @@ export class StatsStore {
       timeoutRate: s.timeoutRate,
       survivalAvg: s.survivalAvg,
       latencyMs: s.latencyAvg,
+      lawComprehension: s.lawGames ? s.lawComprehension : null,
     };
   }
 

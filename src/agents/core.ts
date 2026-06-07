@@ -43,6 +43,17 @@ export interface Rules {
   bell_tick?: number;
   /** Extra twists layered on the base card this round (may be empty/absent). */
   modifiers?: { id: string; name: string; brief: string }[];
+  /** Dynamics-changing "laws" in force this round, in natural language (may be
+   * empty/absent). Each has a machine `kind`, a short `title`, and a prose `brief`.
+   * Laws with a board location also carry it (cadence `anchor`/`every`, confine `rect`). */
+  laws?: {
+    kind: string;
+    title: string;
+    brief: string;
+    anchor?: { x: number; y: number };
+    every?: number;
+    rect?: { x: number; y: number; w: number; h: number };
+  }[];
 }
 
 export interface State {
@@ -56,17 +67,16 @@ export interface State {
     length: number;
     body: Cell[];
     combo?: number;
-    frenzy_ticks_left?: number;
-    ghost_ticks_left?: number;
-    flare_ticks_left?: number;
-    magnet_ticks_left?: number;
     zone_ticks?: number;
     waypoints_done?: number;
     next_waypoint?: Cell | null;
+    /** This agent's own recent moves (oldest first) and whether each was legal —
+     * `move` is "none" when it timed out; `legal` is false for a rejected
+     * (illegal neck-reversal) move. Server-provided short-term memory. */
+    recent_moves?: { tick: number; move: Direction | "none"; legal: boolean }[];
   };
   food: Food[];
   obstacles: Cell[];
-  power_ups: Array<{ x: number; y: number; kind: string }>;
   snakes: SnakeView[];
 }
 
@@ -82,12 +92,22 @@ export interface Decision {
   log?: Record<string, unknown>;
 }
 
+/** Everything a brain gets for one decision. The server is the environment: it
+ * sends the INFORMATION to play — the structured `state` and the structured
+ * `rules` (objective + laws). Turning that into a model prompt is the brain's
+ * job; the server does no prompting. */
+export interface Observation {
+  state: State;
+  rules: Rules | null;
+  signal: AbortSignal;
+}
+
 export interface Brain {
   /** Recorded as `model` in telemetry and shown on connect. */
   name: string;
   /** One-line human description for the connect banner. */
   banner: string;
-  decide(state: State, rules: Rules | null, signal: AbortSignal): Decision | Promise<Decision>;
+  decide(obs: Observation): Decision | Promise<Decision>;
 }
 
 /** Connect to the arena and play with the given brain, reconnecting on drop. */
@@ -131,6 +151,9 @@ export function runAgent(brain: Brain): void {
 
     ws.on("message", async (raw) => {
       const msg = JSON.parse(raw.toString());
+      if (msg.type === "welcome") {
+        return;
+      }
       if (msg.type === "round_start") {
         if (msg.rules) rules = msg.rules as Rules;
         console.log(`Round ${msg.round} started — rules: ${rules ? rules.name : "classic"}.`);
@@ -168,7 +191,7 @@ export function runAgent(brain: Brain): void {
 
       const started = Date.now();
       try {
-        const decision = await brain.decide(state, rules, ac.signal);
+        const decision = await brain.decide({ state, rules, signal: ac.signal });
         clearTimeout(timer);
         const move = decision.move;
         if (move && ws.readyState === WebSocket.OPEN) {

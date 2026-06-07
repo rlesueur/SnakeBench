@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { analyseMove, reachableSpace, type MoveContext } from "../src/engine/decision-quality.js";
+import { LAW_BUILDERS } from "../src/engine/laws.js";
 import type { Direction } from "../src/types.js";
 
 function ctx(over: Partial<MoveContext> = {}): MoveContext {
@@ -88,6 +89,75 @@ describe("decision-quality analyser", () => {
       ctx({ heading: "right", submittedMove: "up", selfLength: 4, enemyHeads }),
     );
     expect(up.choseSafe).toBe(true);
+  });
+
+  // The scorer must judge a move where the engine will actually resolve it once
+  // a law changes the dynamics — otherwise the benchmark can't tell whether an
+  // agent understood the round's prose. Each case shows the SAME submitted move
+  // flipping verdict because of the law, and a law-aware alternative scoring safe.
+  describe("is law-aware (the scoring discriminates reasoning from reflex)", () => {
+    it("transform: a move judged safe by physics is unsafe once reversed controls send it into the wall", () => {
+      // Head against the east wall, heading up (reverse = down).
+      const base = { head: { x: 9, y: 5 }, heading: "right" as Direction, width: 10, height: 10 };
+      // Lawless: submitting "up" steps to (9,4) — safe.
+      expect(analyseMove(ctx({ ...base, submittedMove: "up" })).choseSafe).toBe(true);
+      // Reversed controls: "down" is submitted, transformed to "up" → still (9,4);
+      // but submitting "up" transforms to "down" → (9,6). Use a wall-bound case:
+      const laws = [LAW_BUILDERS.rotate(2)];
+      // Submitting "right" is coerced (transforms to its reverse "left") — but the
+      // telling case: "up" transforms to "down" (safe) and "down" → "up" (safe);
+      // put the danger to the east so a naive "stay off the wall" pick backfires.
+      const edge = { head: { x: 9, y: 5 }, heading: "up" as Direction, width: 10, height: 10 };
+      // Lawless, "left" → (8,5) safe.
+      expect(analyseMove(ctx({ ...edge, submittedMove: "left" })).choseSafe).toBe(true);
+      // Reversed: "left" → transformed "right" → (10,5) off-board → unsafe, but a
+      // law-aware agent submits "right" → "left" → (8,5) safe.
+      const blind = analyseMove(ctx({ ...edge, submittedMove: "left", laws }));
+      expect(blind.choseSafe).toBe(false);
+      expect(blind.hadSafeAlternative).toBe(true);
+      expect(analyseMove(ctx({ ...edge, submittedMove: "right", laws })).choseSafe).toBe(true);
+    });
+
+    it("constraint: a turn that is safe normally becomes unsafe under a one-way-turn law", () => {
+      const base = { head: { x: 5, y: 5 }, heading: "right" as Direction };
+      // Lawless: turning up (a left turn) lands on the open cell (5,4) — safe.
+      expect(analyseMove(ctx({ ...base, submittedMove: "up" })).choseSafe).toBe(true);
+      // no_turn(left): the same "up" is a banned left turn → fatal → unsafe, but
+      // straight-on / the right turn remain safe alternatives.
+      const laws = [LAW_BUILDERS.noTurn("left")];
+      const blind = analyseMove(ctx({ ...base, submittedMove: "up", laws }));
+      expect(blind.choseSafe).toBe(false);
+      expect(blind.hadSafeAlternative).toBe(true);
+      expect(analyseMove(ctx({ ...base, submittedMove: "down", laws })).choseSafe).toBe(true);
+    });
+
+    it("constraint: a move is unsafe on a cadence tick unless it closes on the beacon", () => {
+      // Anchor north at (5,0); on tick 2 (a multiple of 2) we must move closer.
+      const base = { head: { x: 5, y: 5 }, heading: "up" as Direction };
+      const laws = [LAW_BUILDERS.cadence(2, { x: 5, y: 0 })];
+      // Turning aside (left) keeps the same distance → unlawful → unsafe.
+      const aside = analyseMove(ctx({ ...base, submittedMove: "left", laws, tick: 2 }));
+      expect(aside.choseSafe).toBe(false);
+      expect(aside.hadSafeAlternative).toBe(true);
+      // Heading straight up closes the distance → safe.
+      expect(analyseMove(ctx({ ...base, submittedMove: "up", laws, tick: 2 })).choseSafe).toBe(true);
+    });
+
+    it("semantic: inversion makes obstacles passable and large food lethal", () => {
+      const base = { head: { x: 5, y: 5 }, heading: "right" as Direction };
+      const obstacle = { x: 5, y: 4 };
+      const obstacles = new Set<string>([`${obstacle.x},${obstacle.y}`]);
+      // Lawless: an obstacle to the north blocks "up".
+      expect(analyseMove(ctx({ ...base, submittedMove: "up", obstacles })).choseSafe).toBe(false);
+      // Inversion: that same obstacle is harmless to enter → "up" is now safe...
+      const laws = [LAW_BUILDERS.inversion(6)];
+      expect(analyseMove(ctx({ ...base, submittedMove: "up", obstacles, laws })).choseSafe).toBe(true);
+      // ...but eating large food (≥6) is now fatal.
+      const food = new Map<string, number>([["5,4", 6]]);
+      const lethal = analyseMove(ctx({ ...base, submittedMove: "up", food, laws }));
+      expect(lethal.choseSafe).toBe(false);
+      expect(lethal.hadSafeAlternative).toBe(true);
+    });
   });
 
   it("flood-fills only the reachable free pocket", () => {

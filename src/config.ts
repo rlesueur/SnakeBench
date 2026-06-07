@@ -5,7 +5,7 @@
  * particular `tickDeadlineMs` is PROVISIONAL (see spec) and will be tuned
  * against a real agent during local testing.
  */
-import type { PowerKind } from "./types.js";
+import type { Law } from "./engine/laws.js";
 /**
  * Head-to-head collision rule: who survives when two heads meet on the same
  * cell. Set per-round by the active rule card.
@@ -79,23 +79,6 @@ export interface GameConfig {
   /** Maximum bonus growth added by a combo streak. */
   comboMaxBonus: number;
 
-  /** Number of power-up pickups kept on the board. */
-  powerUpTarget: number;
-  /** Relative spawn weights for each collectible power-up kind. */
-  powerUpWeights: { kind: PowerKind; weight: number }[];
-  /** How long the frenzy power-up doubles food value, in ticks. */
-  frenzyDurationTicks: number;
-  /** How long ghost (pass through snake bodies) lasts, in ticks. */
-  ghostDurationTicks: number;
-  /** How long a vision flare lasts, in ticks. */
-  flareDurationTicks: number;
-  /** Extra vision radius granted while a flare is active. */
-  flareVisionBonus: number;
-  /** How long a magnet pulls food, in ticks. */
-  magnetDurationTicks: number;
-  /** Radius (Manhattan) within which a magnet drags food one cell closer/tick. */
-  magnetRadius: number;
-
   /** Famine decay: if > 0, a snake that has not eaten within this many ticks
    * loses a tail segment every `lengthTaxTicks` ticks (down to its starting
    * length). 0 disables the mechanic. */
@@ -109,12 +92,22 @@ export interface GameConfig {
 
   /** Hard cap on match length in ticks (safety valve). */
   maxTicks: number;
+
+  /** "Law" rounds: 0–2 natural-language rules that change the dynamics — how a
+   * submitted move is interpreted, which moves are legal, or what cells mean.
+   * Enforced at the move chokepoint in `step()`. Empty/undefined = plain physics. */
+  laws?: Law[];
 }
 
 export const DEFAULT_CONFIG: GameConfig = {
   width: 200,
   height: 200,
-  tickDeadlineMs: 2000,
+  // Safety-net ceiling per move, NOT the expected think time. The adaptive tick
+  // resolves the instant every live agent has locked in, so moves are paced by
+  // the agents themselves; this value only bounds an agent that never submits
+  // (hang/crash), after which the tick resolves without it. Kept generous (60s)
+  // so a genuinely slow reasoning model is never cut off mid-thought.
+  tickDeadlineMs: 60000,
   foodTarget: 400,
   foodTypes: [
     { value: 1, weight: 80 }, // common pellet
@@ -125,27 +118,18 @@ export const DEFAULT_CONFIG: GameConfig = {
   obstacleDensity: 0.009,
   foodGrows: true,
   absorbFraction: 0.5,
-  cutoffAbsorbFraction: 0,
+  // Cutting a rival off pays on EVERY round (not just kill cards): the killer
+  // absorbs this fraction of the victim's length, so aggression is always a live
+  // option and snakes have a reason to seek each other out rather than farm alone.
+  cutoffAbsorbFraction: 0.35,
   headToHead: "longest",
   comboWindowTicks: 4,
   comboMaxBonus: 4,
-  powerUpTarget: 8,
-  powerUpWeights: [
-    { kind: "frenzy", weight: 4 },
-    { kind: "ghost", weight: 2 },
-    { kind: "flare", weight: 2 },
-    { kind: "magnet", weight: 2 },
-    { kind: "wall", weight: 2 },
-  ],
-  frenzyDurationTicks: 30,
-  ghostDurationTicks: 12,
-  flareDurationTicks: 40,
-  flareVisionBonus: 14,
-  magnetDurationTicks: 25,
-  magnetRadius: 5,
   lengthTaxTicks: 0,
   visionRadius: 24,
-  startingLength: 3,
+  // Snakes start with enough body to actually trap a rival; a 3-segment snake
+  // can't cut anyone off. The arena scales vision to the (now denser) board.
+  startingLength: 5,
   maxTicks: 1200,
 };
 
@@ -163,7 +147,9 @@ export interface ServerConfig {
   /** Grace window after the first agent joins an ambient lobby before the next
    * player round begins, so a burst of agents arriving together share a round. */
   joinGraceMs: number;
-  /** Target grid cells per snake — drives dynamic play-area sizing. */
+  /** Target grid cells per snake — drives dynamic play-area sizing. Kept low so
+   * the board stays dense and snakes are forced into contact (competitive play)
+   * rather than each farming an empty corner. */
   cellsPerSnake: number;
   /** Maximum real agents placed in a single round. Agents beyond this are
    * queued for the next round (the world stops growing at its size cap, so
@@ -181,12 +167,12 @@ export interface ServerConfig {
 
 export const DEFAULT_SERVER_CONFIG: ServerConfig = {
   port: 8080,
-  minSnakes: 12,
+  minSnakes: 16,
   npcFloor: 2,
   npcBackfill: ["greedy", "survivor", "hunter", "glutton", "searcher"],
   roundRestartDelayMs: 2000,
   joinGraceMs: 2000,
-  cellsPerSnake: 1400,
+  cellsPerSnake: 180,
   maxAgentsPerRound: 48,
   ambientTickMs: 200,
   ambientMaxTicks: 600,

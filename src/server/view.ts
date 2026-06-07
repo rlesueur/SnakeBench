@@ -7,6 +7,16 @@ export interface FoodView {
   value: number;
 }
 
+/** One past move and how the engine treated it, fed back to the agent so it has
+ * short-term memory of what it did. `move` is the direction it submitted ("none"
+ * if it timed out); `legal` is false when the move was rejected as an illegal
+ * neck-reversal (the engine ignores it and the snake keeps its heading). */
+export interface RecentMove {
+  tick: number;
+  move: Direction | "none";
+  legal: boolean;
+}
+
 export interface AgentView {
   schema_version: 1;
   tick: number;
@@ -18,10 +28,6 @@ export interface AgentView {
     length: number;
     peak_size: number;
     combo: number;
-    frenzy_ticks_left: number;
-    ghost_ticks_left: number;
-    flare_ticks_left: number;
-    magnet_ticks_left: number;
     /** Ticks this snake has spent inside the scoring zone ("zone" objective). */
     zone_ticks: number;
     /** Waypoints reached so far ("relay" objective). */
@@ -30,10 +36,12 @@ export interface AgentView {
     next_waypoint: Cell | null;
     head: Cell;
     body: Cell[];
+    /** The agent's own last few moves (oldest first) with their legality, so it
+     * can learn from rejected/illegal moves without re-deriving the rules. */
+    recent_moves: RecentMove[];
   };
   food: FoodView[];
   obstacles: Cell[];
-  power_ups: Array<{ x: number; y: number; kind: string }>;
   snakes: Array<{
     id: string;
     display_name_untrusted: string;
@@ -65,14 +73,13 @@ export function buildAgentView(
   game: Game,
   snakeId: string,
   actionDeadlineMs: number,
+  recentMoves: RecentMove[] = [],
 ): AgentView {
   const me = game.snakeById(snakeId);
   if (!me) throw new Error(`Unknown snake: ${snakeId}`);
 
   const head = me.body[0]!;
-  // A vision flare temporarily widens this snake's sight radius.
-  const flared = me.flareUntil > game.tick;
-  const radius = game.config.visionRadius + (flared ? game.config.flareVisionBonus : 0);
+  const radius = game.config.visionRadius;
   const visible = (c: Cell) => Math.abs(c.x - head.x) + Math.abs(c.y - head.y) <= radius;
 
   const food: FoodView[] = [];
@@ -85,12 +92,6 @@ export function buildAgentView(
   for (const k of game.obstacles) {
     const c = decode(k);
     if (visible(c)) obstacles.push(c);
-  }
-
-  const power_ups: Array<{ x: number; y: number; kind: string }> = [];
-  for (const [k, kind] of game.powerUps) {
-    const c = decode(k);
-    if (visible(c)) power_ups.push({ x: c.x, y: c.y, kind });
   }
 
   const snakes = game.snakes
@@ -116,10 +117,6 @@ export function buildAgentView(
       length: me.body.length,
       peak_size: me.peakSize,
       combo: me.comboLevel,
-      frenzy_ticks_left: Math.max(0, me.frenzyUntil - game.tick),
-      ghost_ticks_left: Math.max(0, me.ghostUntil - game.tick),
-      flare_ticks_left: Math.max(0, me.flareUntil - game.tick),
-      magnet_ticks_left: Math.max(0, me.magnetUntil - game.tick),
       zone_ticks: me.zoneTicks,
       waypoints_done: me.waypointIndex,
       next_waypoint: game.config.waypoints?.[me.waypointIndex]
@@ -127,10 +124,10 @@ export function buildAgentView(
         : null,
       head: { ...head },
       body: me.body.filter(visible).map((c) => ({ ...c })),
+      recent_moves: recentMoves,
     },
     food,
     obstacles,
-    power_ups,
     snakes,
     action_deadline_tick: game.tick + 1,
     action_deadline_ms: actionDeadlineMs,

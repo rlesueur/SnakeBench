@@ -1,4 +1,5 @@
 import { Rng } from "../rng.js";
+import { LAW_BUILDERS, type Law, type LawCategory } from "../engine/laws.js";
 
 /**
  * Rule cards: each round is played under one of several rule variants, drawn at
@@ -64,28 +65,6 @@ export const RULE_CARDS: readonly RuleCard[] = [
     foodMod: "normal",
   },
   {
-    id: "last_bite",
-    name: "Last Bite",
-    brief: "Food is SCARCE and the goal is to OUTLAST everyone. Manage your hunger and let rivals make the fatal mistakes.",
-    objective: "survive",
-    foodMod: "scarce",
-  },
-  {
-    id: "attrition",
-    name: "War of Attrition",
-    brief: "Last snake alive wins, BUT you wither if you stop eating — you cannot just camp in a corner. Stay fed and stay alive.",
-    objective: "survive",
-    foodMod: "normal",
-    lengthTaxTicks: 14,
-  },
-  {
-    id: "feeding_frenzy",
-    name: "Feeding Frenzy",
-    brief: "Pure growth race: the largest PEAK LENGTH wins and dying early is not punished. Food is everywhere — eat relentlessly.",
-    objective: "grow",
-    foodMod: "feast",
-  },
-  {
     id: "hunger_games",
     name: "Hunger Games",
     brief: "Grow the BIGGEST (largest peak length) — but food is SCARCE, so you must out-position rivals to reach the little there is.",
@@ -98,51 +77,6 @@ export const RULE_CARDS: readonly RuleCard[] = [
     brief: "Score one point for every tick your HEAD is inside the marked ZONE (see rules.zone). Most points wins — owning the zone beats hiding in open space, but the zone is where everyone collides.",
     objective: "zone",
     foodMod: "normal",
-  },
-  {
-    id: "king_of_the_hill",
-    name: "King of the Hill",
-    brief: "Most ticks spent with your HEAD inside the marked ZONE wins — and food is SCARCE, so you must choose between feeding and holding the hill.",
-    objective: "zone",
-    foodMod: "scarce",
-  },
-  {
-    id: "relay",
-    name: "Relay Race",
-    brief: "Reach the lit WAYPOINTS in order (see rules.waypoints / your you.next_waypoint). Most waypoints reached wins — plan a route, don't just chase food.",
-    objective: "relay",
-    foodMod: "normal",
-  },
-  {
-    id: "grand_prix",
-    name: "Grand Prix",
-    brief: "A waypoint RACE through a FEAST of food: reach the lit waypoints in order (most reached wins). The food is a distraction — stay on the racing line.",
-    objective: "relay",
-    foodMod: "feast",
-  },
-  {
-    id: "last_bell",
-    name: "Last Bell",
-    brief: "The round ENDS at the bell (see rules.bell_tick) and whoever is LONGEST at that moment wins. Surviving past the bell is worthless — time your growth to peak right at the end.",
-    objective: "bell",
-    foodMod: "normal",
-  },
-  {
-    id: "sprint",
-    name: "Sprint Finish",
-    brief: "Be the LONGEST snake when the bell rings (see rules.bell_tick), with food everywhere. A flat-out growth sprint — but you must still be ALIVE and long at the bell.",
-    objective: "bell",
-    foodMod: "feast",
-  },
-  {
-    id: "bloodsport",
-    name: "Bloodsport",
-    brief: "MOST KILLS wins. You start LONG — wrap your body around rivals and force an enemy head into it to cut them off; each kill grows you. Survival only breaks ties.",
-    objective: "kills",
-    foodMod: "normal",
-    cutoffAbsorbFraction: 0.5,
-    startingLength: 6,
-    boardScale: 0.85,
   },
   {
     id: "gladiators",
@@ -194,10 +128,10 @@ export const RULE_CARDS: readonly RuleCard[] = [
 /**
  * Modifiers: orthogonal twists layered ON TOP of a base rule card, drawn 0–2 per
  * round (seeded). Where a card sets the *objective and collision rule*, modifiers
- * reshape the *board and economy* — vision, obstacles, board size, power-ups,
- * shedding, food and special prizes. Stacking a couple of these on a base card
- * yields a large space of distinct situations, so a single hard-coded strategy
- * can't be optimal: an agent has to read the brief and adapt.
+ * reshape the *economy and the value of hunting* — food, carcass richness, famine,
+ * bounties and special prizes. Stacking a couple of these on a base card yields a
+ * large space of distinct situations, so a single hard-coded strategy can't be
+ * optimal: an agent has to read the brief and adapt.
  *
  * Every field is an absolute override (or flag) the arena applies when building
  * the round config; `brief` is appended to the announced rules so agents and
@@ -210,10 +144,6 @@ export interface Modifier {
   brief: string;
   /** Extra multiplier applied to the food target (on top of the card's). */
   foodMultiplier?: number;
-  /** Absolute number of power-up pickups kept on the board. */
-  powerUpTarget?: number;
-  /** Absolute frenzy duration in ticks. */
-  frenzyDurationTicks?: number;
   /** Famine decay period in ticks (0 = off). */
   lengthTaxTicks?: number;
   /** Number of high-value "special" foods spawned at round start. */
@@ -255,25 +185,10 @@ export const MODIFIERS: readonly Modifier[] = [
     lengthTaxTicks: 16,
   },
   {
-    id: "power_surge",
-    name: "Power Surge",
-    brief: "POWER SURGE — power-ups (frenzy, ghost, flare, magnet, wall) are everywhere and last longer; grabbing the right one at the right time is a real edge.",
-    powerUpTarget: 24,
-    frenzyDurationTicks: 55,
-  },
-  {
-    id: "golden_apple",
-    name: "Golden Apple",
-    brief: "A GOLDEN APPLE (worth +12) has appeared somewhere on the board — a huge contested prize worth fighting over.",
-    specialFood: { value: 12, count: 1 },
-    conflicts: ["poison"],
-  },
-  {
     id: "poison",
     name: "Forbidden Fruit",
     brief: "FORBIDDEN FRUIT — the big food ($ and &) is POISON and KILLS you the instant you eat it. Only the small + pellets are safe.",
     poisonValue: 3,
-    conflicts: ["golden_apple"],
   },
 ];
 
@@ -309,9 +224,73 @@ export function foodMultiplier(mod: FoodMod): number {
   }
 }
 
-/** Deterministically pick a rule card for a round. All cards are equally likely:
- * variety is the point, so no single mode dominates. */
+/** Deterministically pick a rule card for a round. Every catalogue card now
+ * genuinely changes the optimal policy (a greedy / nearest-target baseline plays
+ * each one wrongly) — bland "survive and eat" variants a flood-fill bot aces were
+ * removed. Plain "Classic" survival is weighted a little higher because it is the
+ * cleanest canvas for the round's LAW (the dynamics-changer) to sit on; every
+ * other card already alters the win condition itself, so they share equal weight. */
 export function pickRuleCard(seed: string): RuleCard {
   const rng = new Rng(`rules:${seed}`);
-  return rng.pick([...RULE_CARDS]) ?? RULE_CARDS[0]!;
+  const weighted: RuleCard[] = [];
+  for (const c of RULE_CARDS) {
+    const weight = c.id === "classic" ? 3 : 1;
+    for (let i = 0; i < weight; i++) weighted.push(c);
+  }
+  return rng.pick(weighted) ?? RULE_CARDS[0]!;
+}
+
+/**
+ * Laws: 1–2 natural-language rules that change the round's *dynamics* (how a move
+ * is interpreted, which moves are legal, what cells mean) rather than its
+ * scoreboard. EVERY round now draws at least one law — the dynamics-changer is the
+ * point of the benchmark, so no round is left as plain physics — with at most one
+ * law per category so a round never stacks two transforms or two constraints.
+ * Spatial parameters use the round's board dimensions so they vary every round and
+ * can't be hard-coded.
+ *
+ * The acceptance test for every law: a generic flood-fill + nearest-target
+ * program, with no special-casing, must play it *wrongly*. If the only way to
+ * play it well is to read the prose and reason, it belongs here.
+ */
+export function rollLaws(seed: string, width: number, height: number): Law[] {
+  const rng = new Rng(`laws:${seed}`);
+  // At least one law every round (never plain physics); usually one, sometimes two.
+  const count = rng.pick([1, 1, 1, 2, 2]) ?? 1;
+  if (count <= 0) return [];
+  const categories: LawCategory[] = ["transform", "constraint", "semantic"];
+  const used = new Set<LawCategory>();
+  const chosen: Law[] = [];
+  let guard = 0;
+  while (chosen.length < count && used.size < categories.length && guard++ < 20) {
+    const available = categories.filter((c) => !used.has(c));
+    const cat = rng.pick(available);
+    if (!cat) break;
+    used.add(cat);
+    chosen.push(makeLaw(cat, rng, width, height));
+  }
+  return chosen;
+}
+
+/** Build one seeded law for a category, sizing any spatial parameters to the board. */
+function makeLaw(category: LawCategory, rng: Rng, width: number, height: number): Law {
+  const margin = 5;
+  if (category === "transform") {
+    return rng.next() < 0.6
+      ? LAW_BUILDERS.rotate(rng.pick([1, 2, 3] as const)!)
+      : LAW_BUILDERS.mirror(rng.pick(["horizontal", "vertical"] as const)!);
+  }
+  if (category === "constraint") {
+    // no_turn and cadence only — both are spawn-safe (they never kill on the
+    // first tick regardless of where a snake starts).
+    if (rng.next() < 0.5) {
+      return LAW_BUILDERS.noTurn(rng.pick(["left", "right"] as const)!);
+    }
+    const anchor = {
+      x: margin + rng.int(Math.max(1, width - 2 * margin)),
+      y: margin + rng.int(Math.max(1, height - 2 * margin)),
+    };
+    return LAW_BUILDERS.cadence(rng.pick([3, 4, 5] as const)!, anchor);
+  }
+  return LAW_BUILDERS.inversion(6);
 }

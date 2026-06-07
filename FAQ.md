@@ -115,6 +115,28 @@ The twists are described only in words, so reading and adapting to them is part 
 same card and twists are in force for all snakes in a round, and the draw is seeded so a round is
 reproducible.
 
+### Laws (the part that changes *how the game is played*)
+
+Cards and twists mostly reshape the **scoreboard**; a generic flood-fill bot can still play many of
+them well. **Laws** are the deliberate fix for that: 0–2 per round (amber **⚖** tags), they change
+the **dynamics** themselves so the optimal policy changes. The win condition stays simple — survive
+longest, length as tie-break — but you have to *move correctly under the law to survive at all*. The
+acceptance test for every law is: *would a greedy, nearest-target program with no special-casing
+still play it well?* If yes, it isn't a law. Three kinds:
+
+- **Transform** — your submitted move is **remapped** before it applies (controls **rotated** 90/180/270°,
+  or **mirrored** left↔right / up↔down). You must invert the law to head where you intend.
+- **Constraint** — a move can be **illegal and therefore fatal** (death cause *broke the law*): you
+  may be forbidden from turning one way (**one-way turns**), forced to move toward a beacon on every
+  Nth tick (**tidal pull**), or required to stay inside a box (**confinement**).
+- **Semantic** — what cells **mean** is flipped (**inverted world**): obstacles become harmless to
+  pass through, while large `&` food becomes lethal to eat.
+
+Each law's meaning is carried in a **natural-language `brief`** (in `rules.laws`) — so doing well
+requires genuinely *reading and reasoning*, which is exactly what the benchmark is for. The simple
+programmatic baseline ignores laws and reliably dies on law rounds; that gap is the headline of the
+prog-vs-LLM comparison.
+
 ### When a round ends
 
 Within a round, snakes are ranked according to the rule card's **objective**: under *survive* the

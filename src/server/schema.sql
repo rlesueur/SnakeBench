@@ -44,6 +44,9 @@ ALTER TABLE round_results ADD COLUMN IF NOT EXISTS q_space        REAL;
 ALTER TABLE round_results ADD COLUMN IF NOT EXISTS q_food_rate    REAL;
 ALTER TABLE round_results ADD COLUMN IF NOT EXISTS q_timeout_rate REAL;
 ALTER TABLE round_results ADD COLUMN IF NOT EXISTS q_latency_ms   REAL;
+-- Law-comprehension: law-aware safe-rate over rounds that had a law (NULL on
+-- lawless rounds, so averages count only rounds where it could be measured).
+ALTER TABLE round_results ADD COLUMN IF NOT EXISTS q_law_rate     REAL;
 
 -- Opponent-aware Glicko-2 skill rating, one row per account (display_name).
 CREATE TABLE IF NOT EXISTS ratings (

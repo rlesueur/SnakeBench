@@ -495,6 +495,9 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
     lastSentAt: 0,
     send: (msg: unknown) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      // A new decision window resets the idle clock — the agent may spend the
+      // full tick ceiling thinking before it submits.
+      if ((msg as { type?: string }).type === "state") resetIdle();
     },
   };
 

@@ -77,11 +77,8 @@
         return [
           `tick ${v.tick}`,
           `len ${you.length}`,
-          `combo ${you.combo}`,
-          `frenzy ${you.frenzy_ticks_left}`,
           `food ${(v.food || []).length}`,
           `obstacles ${(v.obstacles || []).length}`,
-          `powerups ${(v.power_ups || []).length}`,
           `rivals ${(v.snakes || []).length}`,
         ].join(" · ");
       }

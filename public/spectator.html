@@ -156,9 +156,9 @@
       .dotleg { display: inline-flex; align-items: center; gap: 5px; }
       .dotleg i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 
-      /* Camera controls, bottom-right (above minimap) */
+      /* Camera controls — left rail below the minimap, clear of the scoreboard. */
       #controls {
-        right: 16px; bottom: 188px;
+        left: 16px; top: 276px;
         display: flex; flex-direction: column; gap: 6px; align-items: stretch;
       }
       .btn {
@@ -175,9 +175,9 @@
       .btn:active { transform: translateY(1px); }
       .btn.zoom { font-size: 18px; }
 
-      /* Minimap, bottom-right corner */
+      /* Minimap, top-left rail — stacked above camera controls (#controls). */
       #miniWrap {
-        right: 16px; bottom: 16px;
+        left: 16px; top: 88px;
         padding: 8px; border-radius: 12px;
         background: rgba(8, 20, 32, 0.66);
         backdrop-filter: blur(8px);
@@ -197,6 +197,7 @@
       <a class="chip link" href="/guide.html">How to play</a>
       <a class="chip link" href="/faq.html">Rules &amp; FAQ</a>
       <span class="chip">Round <b id="round">–</b> · Tick <b id="tick">0</b> · <b id="alive">0</b> alive</span>
+      <span class="chip" id="deliberateChip" style="display:none">⏳ <b id="delibInfo">–</b></span>
       <span class="chip" id="followChip">Following <b id="followName">–</b><span class="x" id="unfollow">✕</span></span>
     </div>
 
@@ -227,11 +228,6 @@
         <span class="dotleg"><i style="background:#ffe34d;box-shadow:0 0 8px #ffe34d"></i>food +1</span>&nbsp;
         <span class="dotleg"><i style="background:#ff8f3a;box-shadow:0 0 8px #ff8f3a"></i>+3</span>&nbsp;
         <span class="dotleg"><i style="background:#ff4fd8;box-shadow:0 0 8px #ff4fd8"></i>+6</span>&nbsp;
-        <span class="dotleg"><i style="background:#a06bff;box-shadow:0 0 8px #a06bff"></i>⚡ frenzy</span>&nbsp;
-        <span class="dotleg"><i style="background:#46e0d0;box-shadow:0 0 8px #46e0d0"></i>◌ ghost</span>&nbsp;
-        <span class="dotleg"><i style="background:#ffd24a;box-shadow:0 0 8px #ffd24a"></i>✦ flare</span>&nbsp;
-        <span class="dotleg"><i style="background:#ff7a4a;box-shadow:0 0 8px #ff7a4a"></i>⊓ magnet</span>&nbsp;
-        <span class="dotleg"><i style="background:#9aa7b3;box-shadow:0 0 8px #9aa7b3"></i>▦ wall</span>&nbsp;
         <span class="dotleg"><i style="background:#37506a;border-radius:2px"></i>obstacle</span>
         <span id="legdyn"></span>
       </span>
@@ -268,6 +264,8 @@
         ruleName: document.getElementById("ruleName"),
         ruleBrief: document.getElementById("ruleBrief"),
         rulePills: document.getElementById("rulePills"),
+        deliberateChip: document.getElementById("deliberateChip"),
+        delibInfo: document.getElementById("delibInfo"),
       };
       let currentRules = null;
 
@@ -275,8 +273,19 @@
       let obstacles = [];
       let prev = null;   // previous frame (for interpolation)
       let cur = null;    // latest frame
-      let tickMs = 2000; // measured gap between frames
+      let tickMs = 2000; // measured gap between frames (legacy; kept for minimap timing)
       let follow = null; // snake id to follow, or null
+      // Live "deliberation" beat: which agents are thinking this window, who has
+      // locked in, and the ceiling — set on a `deliberation` msg, cleared on the
+      // next frame (the reveal). Drives the thinking rings + HUD countdown.
+      let think = null;  // { tick, ceiling, start, ids:Set, names:Map, locked:Set }
+      // Moves are revealed crisply over REVEAL_MS, then the board HOLDS for the
+      // rest of the (variable) window while agents think — instead of smearing one
+      // cell of motion across the whole 10s. This is the pipelined reveal.
+      const REVEAL_MS = 420;
+      const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+
+      const trunc = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
 
       // Camera: cam.x/cam.y is the world cell at screen centre; cam.scale = px/cell.
       let cam = { x: 100, y: 100, scale: 6 };
@@ -385,7 +394,8 @@
       // --- interpolation between ticks ---
       function interpT() {
         if (!cur) return 1;
-        return Math.max(0, Math.min(1, (performance.now() - cur.recvT) / tickMs));
+        const raw = Math.max(0, Math.min(1, (performance.now() - cur.recvT) / REVEAL_MS));
+        return easeOut(raw);
       }
       function interpHead(s) {
         const t = interpT();
@@ -471,6 +481,38 @@
           ctx.restore();
         }
 
+        // Tidal Pull beacon ("cadence" law): on the law's cadence ticks every
+        // snake must move strictly closer to this cell or die. Marked with
+        // rippling teal "tide" rings + a label so spectators can see the pull point.
+        const laws = (currentRules && currentRules.laws) || [];
+        for (const law of laws) {
+          if (law.kind !== "cadence" || !law.anchor) continue;
+          const x = sx(law.anchor.x + 0.5), y = sy(law.anchor.y + 0.5);
+          const t = performance.now() / 1000;
+          ctx.save();
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          const baseR = Math.max(7, cam.scale * 1.6);
+          for (let k = 0; k < 3; k++) {
+            const phase = (t * 0.55 + k / 3) % 1; // rings ripple inward toward the beacon
+            const rr = baseR * (1.35 - phase);
+            if (rr <= 0) continue;
+            ctx.beginPath(); ctx.arc(x, y, rr, 0, 7);
+            ctx.strokeStyle = `rgba(110,205,255,${0.55 * (1 - phase)})`;
+            ctx.lineWidth = Math.max(1, cam.scale * 0.14);
+            ctx.stroke();
+          }
+          ctx.beginPath(); ctx.arc(x, y, Math.max(2.5, cam.scale * 0.42), 0, 7);
+          ctx.shadowColor = "#7dd3ff"; ctx.shadowBlur = cam.scale;
+          ctx.fillStyle = "#9fe2ff"; ctx.fill();
+          if (cam.scale >= 4) {
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = "#cfefff";
+            ctx.font = `700 ${Math.max(8, Math.round(cam.scale * 0.62))}px 'Segoe UI', system-ui, sans-serif`;
+            ctx.fillText("TIDE", x, y - baseR * 1.2);
+          }
+          ctx.restore();
+        }
+
         // Obstacles — solid slate blocks with an edge and top highlight so they read as walls.
         if (obstacles.length) {
           const og = Math.max(0.4, cam.scale * 0.06);
@@ -504,32 +546,6 @@
             }
           }
           ctx.restore();
-
-          // Power-ups (colour + glyph per kind).
-          if (cur.powerUps && cur.powerUps.length) {
-            const pulse = 0.78 + 0.22 * Math.sin(performance.now() / 250);
-            const r = Math.max(2, cam.scale * 0.62) * pulse;
-            for (const p of cur.powerUps) {
-              const col = POWER_COL[p.kind] || "#a06bff";
-              const x = sx(p.x + 0.5), y = sy(p.y + 0.5);
-              ctx.save();
-              ctx.fillStyle = col;
-              ctx.shadowColor = col;
-              ctx.shadowBlur = r * 2.2;
-              ctx.beginPath();
-              ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y);
-              ctx.closePath(); ctx.fill();
-              ctx.restore();
-              if (cam.scale >= 6) {
-                ctx.save();
-                ctx.fillStyle = "#0a0f14";
-                ctx.font = `${Math.round(cam.scale * 0.7)}px system-ui`;
-                ctx.textAlign = "center"; ctx.textBaseline = "middle";
-                ctx.fillText(POWER_GLYPH[p.kind] || "?", x, y + 0.5);
-                ctx.restore();
-              }
-            }
-          }
 
           // Snakes.
           for (const s of cur.snakes) {
@@ -587,16 +603,13 @@
             }
           }
         }
+        drawThinking();
+        updateDelibHud();
       }
       const NOTE_COL = {
         safe: "#9fe6c2", risky: "#ffd27a", blunder: "#ff8f8f",
         timeout: "#c9a0ff", illegal: "#ff8f8f",
       };
-      // Colour + glyph per power-up kind (shared by board, auras and feed).
-      const POWER_COL = {
-        frenzy: "#a06bff", ghost: "#46e0d0", flare: "#ffd24a", magnet: "#ff7a4a", wall: "#9aa7b3",
-      };
-      const POWER_GLYPH = { frenzy: "⚡", ghost: "◌", flare: "✦", magnet: "⊓", wall: "▦" };
       const ARROW = { up: "↑", down: "↓", left: "←", right: "→" };
       // Per-snake overlay: lead with the agent's *declared* intent (one short
       // token, optionally a target), so it actually says what the agent is doing.
@@ -622,6 +635,57 @@
       function noteColour(n) {
         if (n.intent && n.intentOk === false) return "#ffd27a";
         return NOTE_COL[n.kind] || "#cfe6f4";
+      }
+
+      // Per-agent "deliberation" overlay during the thinking window: a pulsing
+      // amber ring while the model is still thinking, switching to a steady green
+      // ring + tick the instant it locks in. Only agents (never NPCs) appear here.
+      function drawThinking() {
+        if (!think || !cur) return;
+        for (const s of cur.snakes) {
+          if (!s.alive || !s.body.length || !think.ids.has(s.id)) continue;
+          if (!think.locked.has(s.id)) continue; // no ring while thinking — keep the board readable
+          const h = interpHead(s);
+          const x = sx(h.x), y = sy(h.y);
+          const baseR = Math.max(7, cam.scale * 0.95);
+          // A small green check above the head = locked in. No surrounding ring or
+          // pulse, so an agent's actual move stays easy to read.
+          ctx.save();
+          ctx.strokeStyle = "#7df0b0";
+          ctx.lineWidth = Math.max(1.6, cam.scale * 0.17);
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          const cy = y - baseR * 1.1;
+          ctx.beginPath();
+          ctx.moveTo(x - baseR * 0.32, cy);
+          ctx.lineTo(x - baseR * 0.06, cy + baseR * 0.28);
+          ctx.lineTo(x + baseR * 0.36, cy - baseR * 0.3);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      // HUD chip: "Deliberating L/N · Xs" counting down the ceiling. The count
+      // usually completes (all locked in) well before the timer runs out.
+      function applyDeliberation(d) {
+        if (!d) { think = null; return; }
+        // Server `started_at` keeps the countdown accurate after refresh/reconnect.
+        const elapsed = Date.now() - (d.started_at || Date.now());
+        think = {
+          tick: d.tick,
+          ceiling: d.ceiling_ms || 10000,
+          start: performance.now() - elapsed,
+          ids: new Set((d.agents || []).map((a) => a.id)),
+          names: new Map((d.agents || []).map((a) => [a.id, a.name])),
+          locked: new Set(d.locked || []),
+        };
+      }
+      function updateDelibHud() {
+        if (!think) { els.deliberateChip.style.display = "none"; return; }
+        const remain = Math.max(0, think.ceiling - (performance.now() - think.start));
+        els.delibInfo.textContent =
+          `Deliberating ${think.locked.size}/${think.ids.size} · ${(remain / 1000).toFixed(1)}s`;
+        els.deliberateChip.style.display = "inline-flex";
       }
 
       function drawHoneycomb(bx, by, bw, bh) {
@@ -656,21 +720,6 @@
         if (pts.length > 1) {
           ctx.lineCap = "round";
           ctx.lineJoin = "round";
-          const fx = s.effects && s.effects.length ? s.effects : (s.frenzy ? ["frenzy"] : []);
-          let auraStep = 0;
-          for (const ef of fx) {
-            const col = POWER_COL[ef];
-            if (!col) continue;
-            ctx.save();
-            ctx.globalAlpha = ef === "ghost" ? 0.55 : 0.85;
-            ctx.shadowColor = col;
-            ctx.shadowBlur = Math.max(6, cam.scale * 1.2);
-            ctx.strokeStyle = col;
-            ctx.lineWidth = wBody + Math.max(2, cam.scale * 0.5) + auraStep;
-            strokePath(pts);
-            ctx.restore();
-            auraStep += Math.max(1.5, cam.scale * 0.32);
-          }
           if (followed) {
             ctx.save();
             ctx.shadowColor = "#fff";
@@ -1014,11 +1063,16 @@
         if (!r) return;
         currentRules = r;
         const mods = Array.isArray(r.modifiers) ? r.modifiers : [];
-        els.ruleName.textContent = (r.name || "—") + (mods.length ? " +" + mods.length : "");
-        // Card brief, then each active twist on its own line.
+        const laws = Array.isArray(r.laws) ? r.laws : [];
+        els.ruleName.textContent =
+          (r.name || "—") + (mods.length ? " +" + mods.length : "") + (laws.length ? " ⚖" + laws.length : "");
+        // Card brief, each active twist, then each LAW on its own emphasised line.
         let briefHtml = `<span>${escapeHtml(r.brief || "")}</span>`;
         for (const m of mods) {
           briefHtml += `<br><span class="modBrief">▸ ${escapeHtml(m.brief)}</span>`;
+        }
+        for (const l of laws) {
+          briefHtml += `<br><span class="modBrief" style="color:#ff9f6b">⚖ ${escapeHtml(l.brief)}</span>`;
         }
         els.ruleBrief.innerHTML = briefHtml;
         els.rulePills.innerHTML =
@@ -1026,8 +1080,9 @@
           pill(FOOD_LABEL[r.food] || r.food, r.food === "scarce") +
           (r.food_grows === false ? pill("Food doesn't feed you", true) : "") +
           (r.poison_value ? pill("Big food = poison ☠", true) : "") +
-          (r.bell_tick ? pill("Bell @ tick " + r.bell_tick, true) : "") +
-          mods.map((m) => pill(m.name, true)).join("");
+          (r.bell_tick ? pill((r.objective === "bell" ? "Bell @ tick " : "Ends @ tick ") + r.bell_tick, true) : "") +
+          mods.map((m) => pill(m.name, true)).join("") +
+          laws.map((l) => pill("⚖ " + l.title, true)).join("");
 
         // Round-aware legend: only show board elements that exist this round, so
         // spectators always know what every marker means without clutter.
@@ -1042,6 +1097,10 @@
             entries.push('<i style="background:transparent;border:2px solid #ffd24a;box-shadow:none"></i>✦ waypoint');
           if (r.poison_value)
             entries.push('☠ $/&amp; food = poison');
+          if (laws.some((l) => l.kind === "cadence"))
+            entries.push('<i style="background:#9fe2ff;box-shadow:0 0 8px #7dd3ff;border-radius:50%"></i>TIDE beacon — move closer on cadence ticks');
+          if (laws.length)
+            entries.push('⚖ law in force — read the rules panel');
           dyn.innerHTML = entries.map((e) => `&nbsp;<span class="dotleg">${e}</span>`).join("");
         }
       }
@@ -1084,17 +1143,48 @@
       }
 
       // --- live kill / commentary feed (game events only — no per-tick chatter) ---
-      let feed = []; // { html, kind, t }
+      let feed = []; // { key, html, kind, t }
+      let feedKey = 0;
       const FEED_MAX = 6;
       const FEED_TTL = 7000;
+      const FEED_FADE = 1400; // final stretch over which a row fades to nothing
 
       function pushFeed(html, kind) {
-        feed.push({ html, kind, t: performance.now() });
+        feed.push({ key: ++feedKey, html, kind, t: performance.now() });
         if (feed.length > FEED_MAX) feed.shift();
         renderFeed();
       }
       function nm(name, id) {
         return `<b style="color:${id ? headCol(id) : "#eaf4fb"}">${escapeHtml(name)}</b>`;
+      }
+      // --- caster: turn the server's per-move notes into occasional commentary.
+      // Selective + throttled so it reads like a commentator, not a log: only
+      // notable moments (blunders, timeouts, illegal moves) and at most one line
+      // per snake per few seconds (deduped by what happened).
+      const sayState = new Map(); // id -> last notable category emitted (null when not notable)
+      function casterFromNotes(notes) {
+        if (!notes) return;
+        for (const [id, n] of notes) {
+          if (!n) continue;
+          let key = null, html = null;
+          if (n.kind === "timeout") {
+            key = "timeout";
+            html = `${nm(n.name, id)} ran out of thinking time`;
+          } else if (n.kind === "illegal") {
+            key = "illegal";
+            html = `${nm(n.name, id)} tried an illegal move`;
+          } else if (n.kind === "blunder") {
+            key = "blunder";
+            html = `${nm(n.name, id)} stepped into danger — a safe move existed`;
+          }
+          // Edge-triggered: only announce when a snake first *enters* a notable
+          // state. While it stays in (or returns straight to) the same state we
+          // stay quiet, so a line appears once, fades, and does not flash back.
+          // Returning to a safe move resets it, so a later relapse is announced.
+          const prev = sayState.get(id) ?? null;
+          if (key && key !== prev) pushFeed(html, "say");
+          sayState.set(id, key);
+        }
       }
       function ingestEvents(events) {
         if (!events) return;
@@ -1102,27 +1192,41 @@
           if (e.kind === "kill") {
             pushFeed(`${nm(e.displayName, e.id)} ate ${nm(e.victimName, e.victim)} <span style="color:#ffd54a">+${e.amount}</span>`, "kill");
           } else if (e.kind === "death" && !e.isNpc) {
-            const how = { wall: "hit a wall", obstacle: "hit an obstacle", body: "ran into a snake", head2head: "lost a head-to-head", poison: "ate poison ☠" }[e.cause] || "died";
+            const how = { wall: "hit a wall", obstacle: "hit an obstacle", body: "ran into a snake", head2head: "lost a head-to-head", poison: "ate poison ☠", unlawful: "broke the law ⚖" }[e.cause] || "died";
             pushFeed(`${nm(e.displayName, e.id)} ${how}`, "death");
-          } else if (e.kind === "powerup" && !e.isNpc) {
-            pushFeed(`${nm(e.displayName, e.id)} grabbed ${e.power} ${POWER_GLYPH[e.power] || ""}`, "frenzy");
-          } else if (e.kind === "wall") {
-            // A dropped wall becomes part of the static obstacle field.
-            for (const c of (e.cells || [])) obstacles.push(c);
-            if (!e.isNpc) pushFeed(`${nm(e.displayName, e.id)} dropped a wall ▦`, "frenzy");
           } else if (e.kind === "waypoint" && !e.isNpc) {
             pushFeed(`${nm(e.displayName, e.id)} reached waypoint ${e.index} ✦`, "frenzy");
           }
         }
       }
+      // Reconcile by key rather than rebuilding innerHTML: existing rows keep
+      // their DOM node (so the feedIn entry animation only plays once, on first
+      // appearance) and we just nudge their opacity. Rebuilding wholesale every
+      // tick was replaying that 0→1 animation on every row, which is what made
+      // the lines flash once a second.
       function renderFeed() {
         const now = performance.now();
         feed = feed.filter((f) => now - f.t < FEED_TTL);
-        els.feed.innerHTML = feed
-          .map((f) => `<div class="feedrow ${f.kind}" style="opacity:${now - f.t > FEED_TTL - 1200 ? 0.35 : 1}">${f.html}</div>`)
-          .join("");
+        const live = new Set();
+        for (const f of feed) {
+          live.add(String(f.key));
+          const age = now - f.t;
+          const op = age > FEED_TTL - FEED_FADE ? Math.max(0, (FEED_TTL - age) / FEED_FADE) : 1;
+          let row = els.feed.querySelector(`[data-key="${f.key}"]`);
+          if (!row) {
+            row = document.createElement("div");
+            row.className = `feedrow ${f.kind}`;
+            row.dataset.key = String(f.key);
+            row.innerHTML = f.html;
+            els.feed.appendChild(row);
+          }
+          row.style.opacity = String(op);
+        }
+        for (const row of [...els.feed.children]) {
+          if (!live.has(row.dataset.key)) row.remove();
+        }
       }
-      setInterval(renderFeed, 1000);
+      setInterval(renderFeed, 300);
 
       function connect() {
         const ws = new WebSocket(`ws://${location.host}/spectate`);
@@ -1135,8 +1239,12 @@
             ingestFrame(msg.frame);
             renderRules(msg.rules);
             if (msg.round != null) els.round.textContent = msg.round;
+            if (msg.frame) els.tick.textContent = msg.frame.tick;
+            applyDeliberation(msg.deliberation);
           } else if (msg.type === "round_start") {
             clearCountdown();
+            think = null;
+            sayState.clear();
             obstacles = msg.obstacles || [];
             prev = null; cur = null;
             feed = []; renderFeed();
@@ -1144,14 +1252,21 @@
             renderRules(msg.rules);
             els.round.textContent = msg.round;
           } else if (msg.type === "frame") {
+            think = null; // reveal: drop the thinking overlay until the next window
             ingestFrame(msg.frame, msg.notes);
             ingestEvents(msg.events);
+            casterFromNotes(cur.notes);
             els.tick.textContent = msg.frame.tick;
+          } else if (msg.type === "deliberation") {
+            applyDeliberation(msg);
+          } else if (msg.type === "locked_in") {
+            if (think && msg.tick === think.tick) think.locked.add(msg.id);
           } else if (msg.type === "leaderboard") {
             applyDeltas(msg.deltas);
             renderStats(msg.board);
             return;
           } else if (msg.type === "round_end") {
+            think = null;
             if (msg.rules) renderRules(msg.rules);
             const why = {
               all_dead: "everyone died",
@@ -1159,6 +1274,8 @@
               agents_eliminated: "all agents out",
               time_limit: "time limit",
               stalemate: "stalemate",
+              bell: "the bell",
+              objective_complete: "objective complete",
             }[msg.reason] || msg.reason || "";
             const top = msg.standings[0]?.display_name ?? "?";
             const base = `Round ${msg.round}: ${top} won${why ? " (" + why + ")" : ""}`;

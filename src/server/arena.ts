@@ -12,8 +12,9 @@ import { NPC_REGISTRY, NPC_ANCHOR, type NpcKind } from "../npc/bots.js";
 import { DIRECTIONS, DELTA, type Direction, type Cell, type Snake, cellKey } from "../types.js";
 import { analyseMove, type MoveContext, SPACE_CAP } from "../engine/decision-quality.js";
 import { expandStandings, DEFAULT_RATING, DEFAULT_RD } from "../rating/glicko2.js";
-import { buildAgentView } from "./view.js";
-import { pickRuleCard, rollModifiers, foodMultiplier, type RuleCard, type Modifier } from "../rules/cards.js";
+import { buildAgentView, type RecentMove } from "./view.js";
+import { pickRuleCard, rollModifiers, rollLaws, foodMultiplier, type RuleCard, type Modifier } from "../rules/cards.js";
+import { type Law, applyTransform } from "../engine/laws.js";
 import { parseIntent, sanitiseTarget, type Intent } from "./intent.js";
 import { fullSnapshot, staticMap, type SpectatorFrame } from "./snapshot.js";
 import { roundDecisionQuality } from "./stats.js";
@@ -44,6 +45,9 @@ export interface AgentSession {
   /** Server-measured latency (ms) of the most recent action: time from sending
    * the state to receiving the move. */
   lastLatencyMs?: number | null;
+  /** This agent's last few {tick, move, legal} results, fed back in each state so
+   * the model has short-term memory of what it did. Reset each round. */
+  recentMoves?: RecentMove[];
 }
 
 export interface ArenaHooks {
@@ -51,6 +55,9 @@ export interface ArenaHooks {
 }
 
 const VALID_MOVES = new Set<string>(DIRECTIONS);
+
+/** How many of an agent's most recent moves to feed back to it each tick. */
+const RECENT_MOVES_CAP = 10;
 
 /** A live, server-authoritative read on an agent's latest move, for commentary.
  * `kind` classifies the move; `text` is a short human-readable summary; `says`
@@ -74,6 +81,19 @@ export interface RulesPayload {
   bell_tick?: number;
   /** Extra twists layered on the base card this round (may be empty). */
   modifiers: { id: string; name: string; brief: string }[];
+  /** Dynamics-changing "laws" in force this round, described in natural language
+   * (may be empty). These reshape how a move is interpreted, which moves are
+   * legal, or what cells mean — the agent must read and reason about them.
+   * Laws with a board location also carry it structurally (e.g. a cadence law's
+   * `anchor` beacon, a confine law's `rect`) so clients can mark it. */
+  laws: {
+    kind: string;
+    title: string;
+    brief: string;
+    anchor?: { x: number; y: number };
+    every?: number;
+    rect?: { x: number; y: number; w: number; h: number };
+  }[];
 }
 
 type NoteKind = "safe" | "risky" | "blunder" | "timeout" | "illegal";
@@ -113,6 +133,15 @@ interface QualityAcc {
   intentDeclared: number;
   /** Declared-intent moves that were coherent with the board (server check). */
   intentCoherent: number;
+  /** Moves made while one or more laws were in force this round. */
+  lawMoves: number;
+  /** Law-round moves on which a safe, lawful option existed. */
+  lawSafeOpp: number;
+  /** ...of those, moves where the (law-aware) chosen move was safe and lawful.
+   * The ratio is the agent's law-comprehension rate: did it move correctly once
+   * the round's prose changed the dynamics? A baseline that ignores the laws
+   * scores far below its lawless safe-rate. */
+  lawSafeChosen: number;
 }
 
 /** Maximum serialised size of decision-log evidence we will persist (16 KB).
@@ -169,11 +198,15 @@ export class Arena {
   /** The rule card in force for the current round (objective, head-to-head, food). */
   private roundCard: RuleCard = pickRuleCard("init");
   private roundMods: Modifier[] = [];
+  /** Natural-language "laws" in force this round (dynamics-changing rules). */
+  private roundLaws: Law[] = [];
   /** Alive-snake count last tick, and the tick it last changed (stall detection). */
   private lastAlive = 0;
   private lastAliveChangeTick = 0;
   /** Current tick interval, so we only recreate the timer when it changes. */
   private currentTickMs = 0;
+  /** When the current decision window opened (ms since epoch). Cleared on resolve. */
+  private deliberationStartedAt = 0;
   private tickTimer: NodeJS.Timeout | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
   /** Grace window after the first agent joins an ambient lobby, so a burst of
@@ -212,7 +245,7 @@ export class Arena {
   }
 
   stop(): void {
-    if (this.tickTimer) clearInterval(this.tickTimer);
+    if (this.tickTimer) clearTimeout(this.tickTimer);
     if (this.restartTimer) clearTimeout(this.restartTimer);
     if (this.joinTimer) clearTimeout(this.joinTimer);
     this.tickTimer = null;
@@ -241,6 +274,7 @@ export class Arena {
         obstacles: ReturnType<typeof staticMap>["obstacles"];
         frame: SpectatorFrame;
         rules: RulesPayload;
+        deliberation: ReturnType<Arena["currentDeliberation"]>;
       }
     | null {
     if (!this.game) return null;
@@ -250,6 +284,36 @@ export class Arena {
       obstacles: staticMap(this.game).obstacles,
       frame: this.snapshotNow(this.game),
       rules: this.rulesPayload(),
+      deliberation: this.currentDeliberation(),
+    };
+  }
+
+  /** Snapshot of an open agent decision window, for spectators joining mid-tick. */
+  currentDeliberation():
+    | {
+        tick: number;
+        ceiling_ms: number;
+        started_at: number;
+        agents: Array<{ id: string; name: string }>;
+        locked: string[];
+      }
+    | null {
+    if (!this.game || !this.roundActive || !this.deliberationStartedAt) return null;
+    const agents: Array<{ id: string; name: string }> = [];
+    const locked: string[] = [];
+    for (const snake of this.game.aliveSnakes()) {
+      const session = this.agents.get(snake.id);
+      if (!session) continue;
+      agents.push({ id: snake.id, name: session.displayName });
+      if (session.pendingMove) locked.push(snake.id);
+    }
+    if (agents.length === 0) return null;
+    return {
+      tick: this.game.tick,
+      ceiling_ms: this.currentTickMs,
+      started_at: this.deliberationStartedAt,
+      agents,
+      locked,
     };
   }
 
@@ -311,7 +375,13 @@ export class Arena {
     if (!session) return;
     if (tick !== this.game.tick) return; // stale action
     if (!VALID_MOVES.has(move)) return;
+    const firstThisTick = session.pendingMove === null;
     session.pendingMove = move as Direction;
+    // Let spectators tick this snake over to "locked in" for the live beat (once
+    // per tick — a resubmit just updates the move, not the lock-in state).
+    if (firstThisTick) {
+      this.hooks.broadcastSpectators({ type: "locked_in", id: snakeId, tick });
+    }
     // Server-measured decision latency for this move (state-sent -> action-in).
     session.lastLatencyMs = session.lastSentAt ? Date.now() - session.lastSentAt : null;
     // Keep a short, sanitised rationale for the decision log only (untrusted).
@@ -340,13 +410,17 @@ export class Arena {
         evidence: capEvidence(evidence),
       });
     }
+
+    // Adaptive cadence: if this was the last agent we were waiting on, resolve
+    // the tick now instead of idling until the ceiling.
+    this.maybeResolveEarly();
   }
 
   /** Dynamic play-area: bigger worlds for more snakes, to keep density sane. */
   private worldForPlayers(n: number): { width: number; height: number; foodTarget: number } {
     const side = Math.min(
       260,
-      Math.max(80, Math.round(Math.sqrt(Math.max(1, n) * this.serverConfig.cellsPerSnake))),
+      Math.max(56, Math.round(Math.sqrt(Math.max(1, n) * this.serverConfig.cellsPerSnake))),
     );
     return { width: side, height: side, foodTarget: Math.round(side * side * 0.01) };
   }
@@ -409,9 +483,13 @@ export class Arena {
         latencyCount: 0,
         intentDeclared: 0,
         intentCoherent: 0,
+        lawMoves: 0,
+        lawSafeOpp: 0,
+        lawSafeChosen: 0,
       });
       session.pendingMove = null;
       session.alive = true;
+      session.recentMoves = [];
     }
     // Queued agents sit this round out (no snake); mark them not-alive so the
     // tick loop and idle handling treat them as waiting for the next round.
@@ -462,18 +540,18 @@ export class Arena {
     const minSide = Math.max(50, Math.ceil(Math.sqrt(specs.length * (startingLength + 8) * 4)));
     const width = Math.max(minSide, Math.round(dims.width * scale));
     const height = Math.max(minSide, Math.round(dims.height * scale));
+    // Vision scales with the board so rivals are actually visible to hunt — a fixed
+    // radius on a large board left snakes blind to each other. Clamped so it stays
+    // a partial-observability task on big boards and the payload stays sane.
+    const visionRadius = Math.max(18, Math.min(64, Math.round(Math.max(width, height) * 0.34)));
     // Base economy/combat from the card, then layer each modifier's overrides.
     let foodScale = foodMultiplier(card.foodMod);
-    let powerUpTarget = this.config.powerUpTarget;
-    let frenzyDurationTicks = this.config.frenzyDurationTicks;
     let lengthTaxTicks = card.lengthTaxTicks ?? this.config.lengthTaxTicks;
     let cutoffAbsorbFraction = card.cutoffAbsorbFraction ?? this.config.cutoffAbsorbFraction;
     let carcassFoodValue = card.carcassFoodValue ?? this.config.carcassFoodValue;
     let poisonValue = card.poisonValue;
     for (const m of mods) {
       if (m.foodMultiplier != null) foodScale *= m.foodMultiplier;
-      if (m.powerUpTarget != null) powerUpTarget = m.powerUpTarget;
-      if (m.frenzyDurationTicks != null) frenzyDurationTicks = m.frenzyDurationTicks;
       if (m.lengthTaxTicks != null) lengthTaxTicks = m.lengthTaxTicks;
       if (m.cutoffAbsorbFraction != null) cutoffAbsorbFraction = m.cutoffAbsorbFraction;
       if (m.carcassFoodValue != null) carcassFoodValue = m.carcassFoodValue;
@@ -512,13 +590,28 @@ export class Arena {
     } else if (card.objective === "bell") {
       bellTick = Math.min(maxTicks, ambient ? Math.round(maxTicks * 0.7) : 120 + orng.int(120));
     }
+    // Every agent round gets a hard turn limit (a "bell"), not just the bell card.
+    // Because a round now runs until EVERY agent is out, a lone snake that simply
+    // never dies could otherwise keep a round going indefinitely. Reaching the
+    // limit ends the round and it is scored exactly as it stands (by the round's
+    // own objective). The randomized tick can't be hard-coded by an agent. Ambient
+    // (NPC-only) rounds already cap out via ambientMaxTicks, so they keep that.
+    if (!ambient && bellTick == null) {
+      bellTick = Math.min(maxTicks, 120 + orng.int(120));
+    }
     const effectiveMaxTicks = bellTick ?? maxTicks;
+
+    // Roll the round's "laws" (dynamics-changing rules). Spatial parameters are
+    // sized to the final board, so they vary every round and can't be hard-coded.
+    const laws = rollLaws(seed, width, height);
+    this.roundLaws = laws;
 
     const roundConfig = {
       ...this.config,
       width,
       height,
       foodTarget,
+      visionRadius,
       headToHead: this.config.headToHead,
       startingLength,
       foodGrows: card.foodGrows ?? true,
@@ -526,13 +619,12 @@ export class Arena {
       scoreZone,
       waypoints,
       bellTick,
-      powerUpTarget,
-      frenzyDurationTicks,
       lengthTaxTicks,
       cutoffAbsorbFraction,
       carcassFoodValue,
       tickDeadlineMs: tickMs,
       maxTicks: effectiveMaxTicks,
+      laws,
     };
 
     this.game = Game.create(specs, seed, roundConfig);
@@ -571,18 +663,92 @@ export class Arena {
       });
     });
     this.hooks.broadcastSpectators({ type: "round_start", round: this.round, world, obstacles, rules });
-    this.sendStateToAgents();
+    // Show the starting board immediately. Without this the spectator sits blank
+    // through the whole first decision window (now up to the full ceiling), with
+    // nothing for the thinking overlay to attach to.
+    this.hooks.broadcastSpectators({
+      type: "frame",
+      frame: this.snapshotNow(this.game),
+      events: [],
+      notes: [],
+    });
 
-    // (Re)create the tick timer only when the cadence changes between rounds.
-    if (this.currentTickMs !== tickMs || !this.tickTimer) {
-      if (this.tickTimer) clearInterval(this.tickTimer);
-      this.currentTickMs = tickMs;
-      this.tickTimer = setInterval(() => this.onTick(), tickMs);
-    }
+    // Open the first decision window and arm its ceiling. Subsequent windows are
+    // armed at the end of each resolveTick. `tickMs` is the *ceiling*, not a fixed
+    // wait: the window resolves as soon as every live agent has locked in.
+    this.currentTickMs = tickMs;
+    this.sendStateToAgents();
+    this.broadcastDeliberation();
+    this.armTick();
   }
 
-  private onTick(): void {
+  /** Arm the ceiling timer for the current decision window. The window will
+   * resolve at this deadline at the latest, or earlier via maybeResolveEarly. */
+  private armTick(): void {
+    if (this.tickTimer) clearTimeout(this.tickTimer);
+    this.tickTimer = setTimeout(() => this.resolveTick(), this.currentTickMs);
+  }
+
+  /** Tell spectators a new decision window has opened: which agent snakes are
+   * thinking and the ceiling they have to answer within. This drives the live
+   * "deliberating / locked-in" beat. Skipped for ambient (NPC-only) windows. */
+  private broadcastDeliberation(): void {
+    if (!this.game) return;
+    const agents: Array<{ id: string; name: string }> = [];
+    const locked: string[] = [];
+    for (const snake of this.game.aliveSnakes()) {
+      const session = this.agents.get(snake.id);
+      if (session) {
+        agents.push({ id: snake.id, name: session.displayName });
+        if (session.pendingMove) locked.push(snake.id);
+      }
+    }
+    if (agents.length === 0) return;
+    this.deliberationStartedAt = Date.now();
+    this.hooks.broadcastSpectators({
+      type: "deliberation",
+      tick: this.game.tick,
+      ceiling_ms: this.currentTickMs,
+      started_at: this.deliberationStartedAt,
+      agents,
+      locked,
+    });
+  }
+
+  /** True once every *agent-controlled* live snake has submitted a move for this
+   * tick. NPCs decide instantly at resolve so they never gate. Returns false for
+   * a pure-NPC (ambient) round, which keeps the fixed ambient cadence. */
+  private allLiveAgentsLockedIn(): boolean {
+    if (!this.game) return false;
+    let live = 0;
+    for (const snake of this.game.aliveSnakes()) {
+      const session = this.agents.get(snake.id);
+      if (!session) continue;
+      live += 1;
+      if (!session.pendingMove) return false;
+    }
+    return live > 0;
+  }
+
+  /** Called after an agent submits: if all live agents are now locked in, resolve
+   * the tick early rather than waiting out the ceiling. Scheduled on the next
+   * macrotask so the submitting WS handler unwinds first, and guarded by nulling
+   * the timer so concurrent submissions can't double-resolve. */
+  private maybeResolveEarly(): void {
+    if (!this.roundActive || this.tickTimer === null) return;
+    if (!this.allLiveAgentsLockedIn()) return;
+    clearTimeout(this.tickTimer);
+    this.tickTimer = null;
+    setImmediate(() => this.resolveTick());
+  }
+
+  private resolveTick(): void {
     if (!this.roundActive || !this.game) return;
+    this.deliberationStartedAt = 0;
+    if (this.tickTimer) {
+      clearTimeout(this.tickTimer);
+      this.tickTimer = null;
+    }
     const game = this.game;
 
     const moves = new Map<string, Direction>();
@@ -648,10 +814,17 @@ export class Arena {
       events,
       notes: [...this.liveNotes.values()],
     });
-    this.sendStateToAgents();
 
     const reason = this.endReason(game);
-    if (reason) this.endRound(reason);
+    if (reason) {
+      this.endRound(reason);
+      return;
+    }
+
+    // Open the next decision window and arm its ceiling.
+    this.sendStateToAgents();
+    this.broadcastDeliberation();
+    this.armTick();
   }
 
   /** Manhattan distance from a cell to the nearest food, or Infinity if none. */
@@ -703,6 +876,12 @@ export class Arena {
           .filter((h) => h.id !== snakeId)
           .map((h) => ({ head: h.head, heading: h.heading, length: h.length })),
         headToHead: this.config.headToHead,
+        // Make the analysis law-aware so safe/blunder/avoidable-death reflect the
+        // round's dynamics, not plain physics: a move is judged where the engine
+        // will actually resolve it once transforms/constraints/inversion apply.
+        laws: this.roundLaws,
+        food: game.food,
+        tick: game.tick,
       };
       const a = analyseMove(ctx);
       acc.moves += 1;
@@ -711,6 +890,16 @@ export class Arena {
       if (a.hadSafeAlternative) {
         acc.safeOpp += 1;
         if (a.choseSafe) acc.safeChosen += 1;
+      }
+      // Law-comprehension: the same safe-rate, but tallied only on rounds whose
+      // dynamics were changed by a law. A reasoning agent keeps this near its
+      // lawless safe-rate; a law-blind baseline collapses here.
+      if (this.roundLaws.length) {
+        acc.lawMoves += 1;
+        if (a.hadSafeAlternative) {
+          acc.lawSafeOpp += 1;
+          if (a.choseSafe) acc.lawSafeChosen += 1;
+        }
       }
       acc.spaceSum += a.spaceAfter;
       acc.lastSafeAlt = a.hadSafeAlternative;
@@ -741,7 +930,10 @@ export class Arena {
           huntCell = h.head;
         }
       }
-      const nh = move ? { x: head.x + DELTA[move].x, y: head.y + DELTA[move].y } : head;
+      // Where the head will actually land: transform laws remap the submitted
+      // direction, so feeding/hunting coherence is judged against the real cell.
+      const effMove = move && this.roundLaws.length ? applyTransform(move, this.roundLaws) : move;
+      const nh = effMove ? { x: head.x + DELTA[effMove].x, y: head.y + DELTA[effMove].y } : head;
       const foodNow = this.nearestFoodDist(game, head);
       const foodNext = move ? this.nearestFoodDist(game, nh) : foodNow;
 
@@ -809,6 +1001,18 @@ export class Arena {
         target: session?.lastTarget,
         intentOk,
       });
+
+      // Feed this move's result into the agent's own short-term memory: the next
+      // state carries the last few {tick, move, legal} so the model can see when
+      // a move was rejected as an illegal neck-reversal (or timed out).
+      if (session) {
+        (session.recentMoves ??= []).push({
+          tick: game.tick,
+          move: move ?? "none",
+          legal: a.legal,
+        });
+        if (session.recentMoves.length > RECENT_MOVES_CAP) session.recentMoves.shift();
+      }
     }
   }
 
@@ -824,13 +1028,33 @@ export class Arena {
 
   /** Decide whether (and why) the round should end this tick. */
   private endReason(game: Game): string | null {
-    if (game.tick >= game.config.maxTicks) return "time_limit";
+    // Every round has a turn limit (maxTicks == its bell tick): on a "bell" round
+    // that limit IS the win condition; on every other round it's the safety cap
+    // that stops a never-dying snake dragging the round on forever. Either way the
+    // round ends here and is scored exactly as it stands.
+    if (game.tick >= game.config.maxTicks) {
+      return this.roundCard.objective === "bell" ? "bell" : "time_limit";
+    }
     const alive = game.aliveSnakes().length;
     if (alive === 0) return "all_dead";
-    if (alive === 1) return "last_standing";
-    // Benchmark-aware: once every real agent is out, there is nothing left to
-    // measure, so end the round even if NPCs are still circling.
-    if (this.roundHasAgents && this.aliveAgentCount(game) === 0) return "agents_eliminated";
+    // Win condition reached: the relay is a race, so the first snake to complete
+    // every waypoint wins and the round ends immediately, whoever reached it.
+    if (this.roundCard.objective === "relay") {
+      const total = game.config.waypoints?.length ?? 0;
+      if (total > 0 && game.aliveSnakes().some((s) => s.waypointIndex >= total)) {
+        return "objective_complete";
+      }
+    }
+    if (this.roundHasAgents) {
+      // A player round exists to measure the agents, so it runs until EVERY agent
+      // is out — not the instant one is left standing. A lone surviving agent
+      // keeps playing (and being scored) against any NPCs, or alone, until it
+      // dies, the tick cap, or a stalemate. (NPCs still circling don't matter.)
+      if (this.aliveAgentCount(game) === 0) return "agents_eliminated";
+    } else if (alive === 1) {
+      // Ambient attract round (NPCs only): end when one snake is left standing.
+      return "last_standing";
+    }
     // Stalemate: a few survivors circling without dying. End so the next round
     // can start rather than waiting out the full tick cap.
     if (alive <= 3 && game.tick - this.lastAliveChangeTick >= this.serverConfig.stallTicks) {
@@ -856,6 +1080,13 @@ export class Arena {
       waypoints: cfg?.waypoints,
       bell_tick: cfg?.bellTick,
       modifiers: this.roundMods.map((m) => ({ id: m.id, name: m.name, brief: m.brief })),
+      laws: this.roundLaws.map((l) => ({
+        kind: l.kind,
+        title: l.title,
+        brief: l.brief,
+        ...(l.kind === "cadence" ? { anchor: l.anchor, every: l.every } : {}),
+        ...(l.kind === "confine" ? { rect: l.rect } : {}),
+      })),
     };
   }
 
@@ -866,10 +1097,14 @@ export class Arena {
     for (const session of this.agents.values()) {
       const snake = this.game.snakeById(session.snakeId);
       if (!snake || !snake.alive) continue;
-      const view = buildAgentView(this.game, session.snakeId, deadline);
+      const view = buildAgentView(this.game, session.snakeId, deadline, session.recentMoves ?? []);
       session.lastView = view;
       session.lastViewTick = this.game.tick;
       session.lastSentAt = Date.now();
+      // The server is the environment: it sends the INFORMATION to play — the
+      // structured vision-scoped `state` and the structured `rules` (objective +
+      // laws). It does NOT prompt: turning this into a model prompt is the agent
+      // harness's job.
       session.send({ type: "state", state: view, rules });
     }
   }
@@ -877,6 +1112,11 @@ export class Arena {
   private endRound(reason: string): void {
     if (!this.game) return;
     this.roundActive = false;
+    this.deliberationStartedAt = 0;
+    if (this.tickTimer) {
+      clearTimeout(this.tickTimer);
+      this.tickTimer = null;
+    }
 
     // Rank according to the round's rule card objective. Snakes still alive at
     // round end outrank those who died; remaining ties fall back to peak size.
@@ -1013,6 +1253,11 @@ export class Arena {
             timeoutRate: acc && acc.moves ? acc.timeouts / acc.moves : 0,
             survivalTicks: survival,
             latencyMs: acc && acc.latencyCount ? acc.latencySum / acc.latencyCount : 0,
+            lawMoves: acc?.lawMoves ?? 0,
+            // Law-aware safe-rate over law-round moves; null when this round had
+            // no law (nothing to comprehend), so it never dilutes the average.
+            lawComprehension:
+              acc && acc.lawMoves ? (acc.lawSafeOpp ? acc.lawSafeChosen / acc.lawSafeOpp : 1) : null,
           };
           const intentRate = acc && acc.moves ? acc.intentDeclared / acc.moves : 0;
           const intentCoherentRate = acc && acc.intentDeclared ? acc.intentCoherent / acc.intentDeclared : 0;

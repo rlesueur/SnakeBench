@@ -19,14 +19,6 @@ function cfg(over: Partial<GameConfig> = {}): GameConfig {
     headToHead: "longest",
     comboWindowTicks: 4,
     comboMaxBonus: 4,
-    powerUpTarget: 0,
-    powerUpWeights: [{ kind: "frenzy", weight: 1 }],
-    frenzyDurationTicks: 30,
-    ghostDurationTicks: 12,
-    flareDurationTicks: 40,
-    flareVisionBonus: 14,
-    magnetDurationTicks: 25,
-    magnetRadius: 5,
     lengthTaxTicks: 0,
     visionRadius: 5,
     startingLength: 3,
@@ -213,20 +205,6 @@ describe("new mechanics", () => {
     expect(winner.pendingGrowth).toBe(2);
   });
 
-  it("doubles food value while frenzy is active", () => {
-    const game = single(cfg({ width: 20 }));
-    setBody(game, "s1", "right", [
-      { x: 5, y: 5 },
-      { x: 4, y: 5 },
-      { x: 3, y: 5 },
-    ]);
-    game.snakeById("s1")!.frenzyUntil = 999;
-    game.food.set("6,5", 3); // frenzy -> worth 6
-    game.step(new Map());
-    // +1 grown this tick, +5 still owed
-    expect(game.snakeById("s1")!.pendingGrowth).toBe(5);
-  });
-
   it("withers a snake that hasn't eaten under famine (length tax)", () => {
     const game = single(cfg({ width: 40, lengthTaxTicks: 4 }));
     setBody(game, "s1", "right", [
@@ -272,67 +250,6 @@ describe("new mechanics", () => {
     const kill = events.find((e) => e.kind === "kill");
     expect(kill && kill.kind === "kill" && kill.id).toBe("k");
     expect(kill && kill.kind === "kill" && kill.victim).toBe("v");
-  });
-
-  it("ghost lets a snake pass through a body without dying", () => {
-    const game = Game.create(
-      [
-        { id: "g", displayName: "g", isNpc: false },
-        { id: "b", displayName: "b", isNpc: false },
-      ],
-      "seed",
-      cfg({ width: 20 }),
-    );
-    setBody(game, "b", "left", [
-      { x: 5, y: 5 },
-      { x: 6, y: 5 },
-      { x: 7, y: 5 },
-    ]);
-    setBody(game, "g", "down", [
-      { x: 6, y: 4 },
-      { x: 6, y: 3 },
-    ]);
-    game.snakeById("g")!.ghostUntil = 10; // ghost active
-    game.step(new Map([["b", "left"], ["g", "down"]])); // g -> (6,5) = b's body
-    expect(game.snakeById("g")!.alive).toBe(true); // passed through, no death
-  });
-
-  it("a vision flare widens the agent view radius", async () => {
-    const { buildAgentView } = await import("../src/server/view.js");
-    const game = single(cfg({ width: 60, height: 60, visionRadius: 5, flareVisionBonus: 14 }));
-    setBody(game, "s1", "right", [{ x: 30, y: 30 }]);
-    const before = buildAgentView(game, "s1", 0).vision.radius;
-    game.snakeById("s1")!.flareUntil = 100;
-    const after = buildAgentView(game, "s1", 0).vision.radius;
-    expect(before).toBe(5);
-    expect(after).toBe(19);
-  });
-
-  it("a magnet drags nearby food one cell toward the head", () => {
-    const game = single(cfg({ width: 40, height: 40, magnetRadius: 6 }));
-    setBody(game, "s1", "right", [{ x: 10, y: 10 }]);
-    game.food.clear();
-    game.food.set("15,10", 1); // 5 cells east of the head
-    game.snakeById("s1")!.magnetUntil = 100;
-    game.step(new Map([["s1", "up"]])); // head moves to (10,9); magnet still pulls
-    // Food should have advanced one cell toward the head's column (x decreases).
-    const xs = [...game.food.keys()].map((k) => Number(k.split(",")[0]));
-    expect(Math.min(...xs)).toBeLessThan(15);
-  });
-
-  it("the wall power-up drops obstacles behind the snake", () => {
-    const game = single(cfg({ width: 30, height: 30, obstacleDensity: 0 }));
-    setBody(game, "s1", "right", [
-      { x: 10, y: 10 },
-      { x: 9, y: 10 },
-      { x: 8, y: 10 },
-    ]);
-    game.powerUps.set("11,10", "wall"); // place a wall pickup in front
-    const before = game.obstacles.size;
-    const events = game.step(new Map([["s1", "right"]])); // eat the pickup
-    expect(game.obstacles.size).toBeGreaterThan(before);
-    expect(events.some((e) => e.kind === "wall")).toBe(true);
-    expect(events.some((e) => e.kind === "powerup" && e.power === "wall")).toBe(true);
   });
 
   it("grants the killer growth under a bounty (cut-off absorb)", () => {

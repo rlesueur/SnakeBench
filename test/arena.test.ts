@@ -24,9 +24,12 @@ describe("arena round lifecycle", () => {
 
   it("starts a round, streams state, and ends it, messaging agents and spectators", () => {
     const spectator: any[] = [];
+    // No obstacles and a one-tick cap so two idle snakes (spawned well apart and
+    // ≥3 cells from any wall) cannot die in the single tick — the round
+    // deterministically ends by the time cap regardless of the random seed.
     const arena = new Arena(
       { broadcastSpectators: (m) => spectator.push(m) },
-      { ...DEFAULT_CONFIG, tickDeadlineMs: 10, maxTicks: 4 },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 10, maxTicks: 1, obstacleDensity: 0 },
       { ...DEFAULT_SERVER_CONFIG, minSnakes: 2, npcFloor: 0, roundRestartDelayMs: 1_000_000, joinGraceMs: 1 },
       null,
       null,
@@ -44,7 +47,7 @@ describe("arena round lifecycle", () => {
     expect(a.inbox.some((m) => m.type === "state")).toBe(true);
     expect(spectator.some((m) => m.type === "round_start")).toBe(true);
 
-    // Drive ticks until the time cap (maxTicks=4) ends the round.
+    // Drive ticks until the time cap (maxTicks=1) ends the round.
     vi.advanceTimersByTime(60);
 
     const end = a.inbox.find((m) => m.type === "round_end");

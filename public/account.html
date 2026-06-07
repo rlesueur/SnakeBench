@@ -232,6 +232,7 @@
           ? ""
           : `<div class="submetrics">` +
             `<span>Safe moves <b>${pct(s.safeRate)}</b></span>` +
+            `<span>Law comprehension <b>${s.lawComprehension == null ? "—" : pct(s.lawComprehension)}</b></span>` +
             `<span>Avoidable deaths <b>${pct(s.avoidableRate)}</b></span>` +
             `<span>Avg space <b>${(s.spaceAvg || 0).toFixed(0)}</b></span>` +
             `<span>Growth/tick <b>${(s.foodRate || 0).toFixed(2)}</b></span>` +

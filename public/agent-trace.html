@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM agent reasoning</title>
+  <style>
+    :root {
+      --bg: #0a1219;
+      --panel: #0f1e2c;
+      --border: rgba(120, 180, 220, 0.18);
+      --text: #dceaf4;
+      --muted: #8aa8be;
+      --accent: #5fd0ff;
+      --bad: #ff7b7b;
+      --warn: #ffd54a;
+      --ok: #5fe39b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      background: rgba(8, 18, 28, 0.95);
+    }
+    header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+    header .meta { color: var(--muted); font-size: 12px; }
+    header select, header label {
+      font: inherit;
+      color: var(--text);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+    }
+    main { flex: 1; display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+    #list {
+      border-right: 1px solid var(--border);
+      overflow: auto;
+      background: rgba(6, 14, 22, 0.6);
+    }
+    .item {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+    }
+    .item:hover { background: rgba(95, 208, 255, 0.06); }
+    .item.active { background: rgba(95, 208, 255, 0.12); border-left: 3px solid var(--accent); }
+    .item .row1 { display: flex; justify-content: space-between; gap: 8px; }
+    .item .tick { font-weight: 600; }
+    .item .round { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .item .move { margin-top: 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+    .badge.illegal { background: rgba(255, 123, 123, 0.2); color: var(--bad); }
+    .badge.pending { background: rgba(143, 168, 190, 0.15); color: var(--muted); }
+    .badge.legal { background: rgba(95, 227, 155, 0.15); color: var(--ok); }
+    .badge.remap { background: rgba(255, 213, 74, 0.15); color: var(--warn); }
+    #detail { overflow: auto; padding: 16px 20px; }
+    #detail.empty { display: flex; align-items: center; justify-content: center; color: var(--muted); }
+    section { margin-bottom: 20px; }
+    section h2 {
+      margin: 0 0 8px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 8px;
+    }
+    .fact {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .fact .k { font-size: 10px; color: var(--muted); text-transform: uppercase; }
+    .fact .v { margin-top: 2px; font-weight: 500; }
+    .law {
+      background: rgba(255, 213, 74, 0.08);
+      border: 1px solid rgba(255, 213, 74, 0.25);
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin-bottom: 6px;
+      font-size: 12px;
+    }
+    .law strong { color: var(--warn); }
+    pre.block {
+      margin: 0;
+      padding: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.5 ui-monospace, "Cascadia Code", monospace;
+      max-height: 420px;
+      overflow: auto;
+    }
+    pre.block.reasoning { border-color: rgba(95, 208, 255, 0.25); }
+    pre.block.prompt { border-color: rgba(143, 168, 190, 0.25); max-height: 280px; }
+    .answer {
+      font: 14px ui-monospace, monospace;
+      padding: 10px 12px;
+      background: rgba(95, 208, 255, 0.1);
+      border-radius: 8px;
+      border: 1px solid rgba(95, 208, 255, 0.3);
+    }
+    .empty-list { padding: 24px; color: var(--muted); text-align: center; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LLM reasoning trace</h1>
+    <span class="meta" id="meta">Loading…</span>
+    <label>
+      Filter
+      <select id="filter">
+        <option value="all">All decisions</option>
+        <option value="illegal">Illegal only</option>
+        <option value="remap">Control-remap rounds</option>
+        <option value="no-move">No parsed move</option>
+      </select>
+    </label>
+  </header>
+  <main>
+    <div id="list"></div>
+    <div id="detail" class="empty">Select a decision</div>
+  </main>
+  <script>
+    let session = null;
+    let selectedId = null;
+    let lastDetailSig = "";
+
+    const els = {
+      meta: document.getElementById("meta"),
+      list: document.getElementById("list"),
+      detail: document.getElementById("detail"),
+      filter: document.getElementById("filter"),
+    };
+
+    function esc(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function badge(d) {
+      const parts = [];
+      if (d.outcome === "illegal") parts.push('<span class="badge illegal">illegal</span>');
+      else if (d.outcome === "legal") parts.push('<span class="badge legal">legal</span>');
+      else parts.push('<span class="badge pending">pending</span>');
+      if (d.controlRemap) parts.push('<span class="badge remap">remap</span>');
+      return parts.join(" ");
+    }
+
+    function filtered() {
+      if (!session?.decisions) return [];
+      const f = els.filter.value;
+      return session.decisions.filter((d) => {
+        if (f === "illegal") return d.outcome === "illegal";
+        if (f === "remap") return d.controlRemap;
+        if (f === "no-move") return !d.move;
+        return true;
+      });
+    }
+
+    function renderList() {
+      const rows = filtered();
+      if (!rows.length) {
+        els.list.innerHTML = '<div class="empty-list">No decisions yet</div>';
+        return;
+      }
+      els.list.innerHTML = rows
+        .slice()
+        .reverse()
+        .map(
+          (d) => `<div class="item${d.id === selectedId ? " active" : ""}" data-id="${d.id}">
+            <div class="row1"><span class="tick">Tick ${d.tick}</span>${badge(d)}</div>
+            <div class="round">${esc(d.round ?? "—")}</div>
+            <div class="move">${esc(d.move ?? "?")} / ${esc(d.intent ?? "—")}</div>
+          </div>`,
+        )
+        .join("");
+      els.list.querySelectorAll(".item").forEach((el) => {
+        el.addEventListener("click", () => {
+          selectedId = Number(el.dataset.id);
+          lastDetailSig = "";
+          renderList();
+          renderDetail(true);
+        });
+      });
+    }
+
+    function detailSignature(d) {
+      if (!d) return "";
+      return [d.id, d.outcome, d.move, d.intent, d.reasoning, d.answer, d.prompt, d.latencyMs].join("\0");
+    }
+
+    function renderDetail(force) {
+      const d = session?.decisions?.find((x) => x.id === selectedId);
+      if (!d) {
+        lastDetailSig = "";
+        els.detail.className = "empty";
+        els.detail.textContent = "Select a decision";
+        return;
+      }
+      const sig = detailSignature(d);
+      if (!force && sig === lastDetailSig) return;
+      lastDetailSig = sig;
+
+      // Preserve scroll across refresh — innerHTML wipes it otherwise.
+      const detailScroll = els.detail.scrollTop;
+      const reasoningEl = els.detail.querySelector(".block.reasoning");
+      const promptEl = els.detail.querySelector(".block.prompt");
+      const reasoningScroll = reasoningEl?.scrollTop ?? 0;
+      const promptScroll = promptEl?.scrollTop ?? 0;
+
+      els.detail.className = "";
+      const laws =
+        d.laws?.length ?
+          d.laws.map((l) => `<div class="law"><strong>${esc(l.title)}</strong> (${esc(l.kind)})<br>${esc(l.brief)}</div>`).join("")
+        : "<span style='color:var(--muted)'>None</span>";
+
+      els.detail.innerHTML = `
+        <section>
+          <h2>Situation</h2>
+          <div class="facts">
+            <div class="fact"><div class="k">Round</div><div class="v">${esc(d.round)}</div></div>
+            <div class="fact"><div class="k">Game tick</div><div class="v">${d.tick}</div></div>
+            <div class="fact"><div class="k">Heading</div><div class="v">${esc(d.heading)}</div></div>
+            <div class="fact"><div class="k">Head</div><div class="v">(${d.head?.x}, ${d.head?.y})</div></div>
+            <div class="fact"><div class="k">Submitted</div><div class="v">${esc(d.move ?? "—")}</div></div>
+            <div class="fact"><div class="k">Intent</div><div class="v">${esc(d.intent ?? "—")}</div></div>
+            <div class="fact"><div class="k">Outcome</div><div class="v">${esc(d.outcome)}</div></div>
+            <div class="fact"><div class="k">Time</div><div class="v">${d.latencyMs != null ? d.latencyMs + " ms" : "—"}</div></div>
+          </div>
+        </section>
+        <section><h2>Laws</h2>${laws}</section>
+        <section><h2>Prompt (facts sent to model)</h2><pre class="block prompt">${esc(d.prompt || "(not recorded)")}</pre></section>
+        <section><h2>Chain of thought</h2><pre class="block reasoning">${esc(d.reasoning || "(empty)")}</pre></section>
+        <section><h2>Parsed answer</h2><div class="answer">${esc(d.answer || "—")}</div></section>
+      `;
+
+      els.detail.scrollTop = detailScroll;
+      const newReasoning = els.detail.querySelector(".block.reasoning");
+      const newPrompt = els.detail.querySelector(".block.prompt");
+      if (newReasoning) newReasoning.scrollTop = reasoningScroll;
+      if (newPrompt) newPrompt.scrollTop = promptScroll;
+    }
+
+    async function refresh() {
+      try {
+        const res = await fetch("/api/session");
+        session = await res.json();
+        const n = session.decisions?.length ?? 0;
+        const ill = session.decisions?.filter((d) => d.outcome === "illegal").length ?? 0;
+        els.meta.textContent = `${session.model ?? "?"} · ${n} decisions · ${ill} illegal · ${session.started ?? ""}`;
+        if (selectedId == null && session.decisions?.length) {
+          selectedId = session.decisions[session.decisions.length - 1].id;
+        }
+        renderList();
+        renderDetail();
+      } catch {
+        els.meta.textContent = "Could not reach agent trace server";
+      }
+    }
+
+    els.filter.addEventListener("change", renderList);
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

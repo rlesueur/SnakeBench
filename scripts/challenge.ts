@@ -124,6 +124,8 @@ function main(): void {
         timeoutRate: 0,
         survivalTicks: survival,
         latencyMs: 0,
+        lawMoves: 0,
+        lawComprehension: null,
       };
       return { rank: i + 1, kind: kindOf.get(s.id)!, peak: s.peakSize, survival, quality: roundDecisionQuality(q) };
     });

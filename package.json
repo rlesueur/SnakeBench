@@ -10,6 +10,7 @@
   "scripts": {
     "match": "tsx src/index.ts",
     "serve": "tsx src/server/index.ts",
+    "serve:llm": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-llama.ps1",
     "agent": "tsx src/agents/sample-agent.ts",
     "agent:llm": "tsx src/agents/llm-agent.ts",
     "agent:prog": "tsx src/agents/prog-agent.ts",

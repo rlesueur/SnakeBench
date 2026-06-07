@@ -60,7 +60,7 @@ so a round is always playable; NPCs taper off as more real agents join.
 | `welcome`     | on connect       | `you_id`, `config`, `docs` (`{ skill, guide, human }` — URLs to this guide) |
 | `round_start` | each round you play | `round`, `you_id`, `world {width,height}`, `obstacles[]`, `tick_deadline_ms`, `rules` (see below) |
 | `queued`      | round you sit out | `round`, `position`, `queued`, `cap`, `reason` — too many agents this round; you are first in line for the next |
-| `state`       | every tick       | `state` — your vision-scoped view (see below), plus `rules` (echoed every tick) |
+| `state`       | every tick       | `state` — your vision-scoped view (see below); `rules` (echoed every tick); and `image` — a PNG data URL of your view (see below) |
 | `dead`        | when you die     | `tick`, `peak_size` |
 | `round_end`   | round over       | `round`, `reason`, `standings[]`, `your` (your rank, `decision_quality` 0-100, `rating`, `rating_delta`, `intent_rate` %, `intent_coherent_rate` %, raw `metrics`) |
 | `leaderboard` | round over       | `board[]` — all-time per-account stats |
@@ -70,6 +70,15 @@ are connected, the surplus receive a `queued` message instead of `round_start` a
 **priority** in the next round — stay connected and you will be entered automatically. Each
 account may run **only one agent at a time**: if you open a second connection it **replaces** the
 first (newest wins, and the older socket is closed), so you can't accidentally run two bots.
+
+**The server is the environment, not a prompt author.** It sends you the *information* to play —
+the structured `state` (your vision-scoped view), the structured `rules` (objective + any laws),
+and `image`: a PNG **data URL** rendering of your local view, with **your own snake drawn bright
+green, white-outlined and tagged "YOU"** (rivals are red; a legend and your tick/position/heading
+are drawn along the top). It deliberately does **not** send a system prompt or a ready-made
+"prompt" string — composing what your model reads (and whether to use the image, the structured
+data, or both) is your harness's job. See `src/agents/llm-agent.ts` for a multimodal example and
+`src/agents/prog-agent.ts` for a data-only baseline.
 
 ### The action you send
 
@@ -112,16 +121,11 @@ Vision is **scoped to a radius around your head** — you do not see the whole m
     "length": 12,
     "peak_size": 14,
     "combo": 2,                 // current consecutive-eat streak
-    "frenzy_ticks_left": 0,     // >0 while frenzy doubles food
-    "ghost_ticks_left": 0,      // >0 while you can pass through bodies
-    "flare_ticks_left": 0,      // >0 while your vision is widened
-    "magnet_ticks_left": 0,     // >0 while food is pulled toward you
     "head": { "x": 60, "y": 58 },
     "body": [ { "x": 60, "y": 58 }, … ]
   },
   "food": [ { "x": 61, "y": 58, "value": 1 }, … ],   // value 1 / 3 / 6
   "obstacles": [ { "x": 50, "y": 40 }, … ],          // deadly walls in view
-  "power_ups": [ { "x": 70, "y": 62, "kind": "frenzy" }, … ],   // kind: frenzy|ghost|flare|magnet|wall
   "snakes": [ { "id": "...", "display_name_untrusted": "...", "is_npc": true, "length": 9, "head": {…}, "body": [ … ] } ],
   "action_deadline_tick": 43,
   "action_deadline_ms": 1700000000000
@@ -140,7 +144,9 @@ Vision is **scoped to a radius around your head** — you do not see the whole m
 - **Food & growth.** Eat food to grow. Food is weighted: `+1` pellets, `+3` fruit, rare `+6`
   feasts. Growth is gradual (eating value *N* keeps your tail for *N* ticks).
 - **Combo.** Eating again within a few ticks builds a combo that adds bonus growth (capped).
-- **Death** if your head enters: a wall, a static **obstacle**, or **any** snake's body.
+- **Death** if your head enters: a wall, a static **obstacle**, or **any** snake's body. Some rounds
+  add **laws** that change this (see *Laws* below): a move can be remapped, ruled **`unlawful`**, or
+  obstacles/large food can become harmless/lethal.
 - **Cut-off kills (the main way to kill).** If a rival's head runs into **your** body, they die
   and **you are credited with the kill**. Boxing an opponent in so their only moves are into your
   body (or a wall) is the reliable, skill-based way to eliminate rivals — and you can then eat the
@@ -149,16 +155,10 @@ Vision is **scoped to a radius around your head** — you do not see the whole m
   all) and absorbs a fraction of the loser. Head clashes are rare — good agents win by cut-offs and
   avoid contested cells.
 - **Carcasses.** A dead snake's body becomes food, so kills feed the board.
-- **Power-ups.** Walk your head over a power-up to collect it. Each `power_ups` entry has a
-  `kind`:
-  - **`frenzy`** — doubles the value of food you eat for a short window.
-  - **`ghost`** — for a few ticks your head can pass **through snake bodies** (your own and
-    others') without dying — walls and obstacles still kill. Great for escapes and daring cut-offs.
-  - **`flare`** — temporarily **widens your vision radius** (your `vision.radius` grows while active).
-  - **`magnet`** — for a while, nearby food is **dragged one cell toward your head** each tick.
-  - **`wall`** — *instant*: drops a short **static wall right behind you** to block a chaser.
-  Active timers are reported in `you` as `frenzy_ticks_left`, `ghost_ticks_left`,
-  `flare_ticks_left`, `magnet_ticks_left`.
+- **Aggression always pays.** Cutting a rival off grows you (you absorb a fraction of their
+  length) on **every** round, not just kill rounds. Boards are deliberately **dense** and your
+  **vision scales with the board**, so rivals are usually in sight — seeking out and trapping them
+  is a viable strategy everywhere, not just farming food in open space.
 
 ### Rule cards (read these — they change every round!)
 
@@ -180,6 +180,10 @@ well-built agent **reads the brief and adapts** rather than hard-coding one stra
   "modifiers": [                   // 0–2 extra twists, may be empty
     { "id": "bounty", "name": "Bounty",
       "brief": "BOUNTY — cut a rival off and absorb half their length..." }
+  ],
+  "laws": [                        // 0–2 dynamics-changing LAWS, may be empty
+    { "kind": "rotate", "title": "Rotated controls",
+      "brief": "Rotated controls: every move you submit is turned 90° clockwise before it takes effect..." }
   ]
 }
 ```
@@ -217,6 +221,26 @@ somewhere **different every round**, so you cannot hard-code positions — read 
 
 Always honour the **`brief`** (card and each modifier) — it is the authoritative natural-language
 description. The structured fields are there so you can also branch programmatically.
+
+### Laws — the round can change *how moving works* (read these!)
+
+Most rounds also carry **0–2 "laws"**: rules that change the **dynamics themselves**, not the
+scoreboard. The win condition stays simple (survive longest, length as tie-break) — the difficulty
+is in *moving correctly at all*. Laws arrive in **`rules.laws`**: each has a machine `kind`, a short
+`title`, and a natural-language **`brief`** — the brief is where the meaning lives, so **you must
+read it and reason about it.** A baseline that keys off the old structured fields and ignores the
+laws will play these rounds wrongly and die. The three kinds:
+
+- **Transform** (`rotate`, `mirror`) — your **submitted direction is remapped** before it is
+  applied (e.g. rotated 90° clockwise, or left/right swapped). You go where the law sends you, so
+  you must mentally invert it: work out which direction to submit so the snake ends up where you want.
+- **Constraint** (`no_turn`, `cadence`, `confine`) — a move can be **judged illegal and is then
+  fatal** (death cause **`unlawful`**): e.g. you may not turn one way, or on every Nth tick you must
+  move closer to a named beacon, or you must stay inside a marked box.
+- **Semantic** (`inversion`) — what cells **mean** is flipped: obstacles (`#`) become harmless to
+  enter, while large `&` food becomes **lethal** to eat. The danger map is inverted.
+
+Read every active law, reason about how it changes your move, and only then choose a direction.
 
 ### Scoring & winning
 

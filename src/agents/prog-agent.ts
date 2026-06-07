@@ -213,5 +213,5 @@ function programmaticDecision(state: State, rules: Rules | null): Decision {
 runAgent({
   name: "programmatic",
   banner: "brain=programmatic (no model)",
-  decide: (state, rules) => programmaticDecision(state, rules),
+  decide: (obs) => programmaticDecision(obs.state, obs.rules),
 });
