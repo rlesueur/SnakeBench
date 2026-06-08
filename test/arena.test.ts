@@ -66,12 +66,12 @@ describe("arena round lifecycle", () => {
     arena.stop();
   });
 
-  it("always includes the three baseline NPCs, even with no agents connected", () => {
+  it("always includes the three baseline competitors when no agents are connected", () => {
     const spectator: any[] = [];
     const arena = new Arena(
       { broadcastSpectators: (m) => spectator.push(m) },
       { ...DEFAULT_CONFIG, tickDeadlineMs: 10, maxTicks: 1, obstacleDensity: 0 },
-      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, ambientTickMs: 10, ambientMaxTicks: 1, roundRestartDelayMs: 1_000_000 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, roundRestartDelayMs: 1_000_000 },
       null,
       null,
     );

@@ -145,6 +145,26 @@ interface QualityAcc {
   lawSafeChosen: number;
 }
 
+function freshQualityAcc(): QualityAcc {
+  return {
+    moves: 0,
+    legal: 0,
+    timeouts: 0,
+    safeOpp: 0,
+    safeChosen: 0,
+    spaceSum: 0,
+    lastSafeAlt: false,
+    avoidableDeath: false,
+    latencySum: 0,
+    latencyCount: 0,
+    intentDeclared: 0,
+    intentCoherent: 0,
+    lawMoves: 0,
+    lawSafeOpp: 0,
+    lawSafeChosen: 0,
+  };
+}
+
 /** Maximum serialised size of decision-log evidence we will persist (16 KB).
  * Larger payloads are dropped so an authenticated agent cannot bloat the DB. */
 const MAX_EVIDENCE_BYTES = 16 * 1024;
@@ -183,7 +203,7 @@ export class Arena {
   private npc = new Map<string, { kind: NpcKind; rng: Rng }>();
   private round = 0;
   private roundActive = false;
-  /** Whether this round started with at least one real agent. */
+  /** Whether this round has at least one connected human/LLM agent. */
   private roundHasAgents = false;
   /** snakeId -> account for the agents in the current round (kept across drops). */
   private roundAccounts = new Map<string, string>();
@@ -471,23 +491,7 @@ export class Arena {
     for (const session of playing) {
       specs.push({ id: session.snakeId, displayName: session.displayName, isNpc: false });
       this.roundAccounts.set(session.snakeId, session.displayName);
-      this.roundQuality.set(session.snakeId, {
-        moves: 0,
-        legal: 0,
-        timeouts: 0,
-        safeOpp: 0,
-        safeChosen: 0,
-        spaceSum: 0,
-        lastSafeAlt: false,
-        avoidableDeath: false,
-        latencySum: 0,
-        latencyCount: 0,
-        intentDeclared: 0,
-        intentCoherent: 0,
-        lawMoves: 0,
-        lawSafeOpp: 0,
-        lawSafeChosen: 0,
-      });
+      this.roundQuality.set(session.snakeId, freshQualityAcc());
       session.pendingMove = null;
       session.alive = true;
       session.recentMoves = [];
@@ -507,9 +511,11 @@ export class Arena {
     const agentCount = specs.length;
     this.roundHasAgents = agentCount > 0;
 
-    // Fixed baseline roster — always present so there is always competition.
+    // Fixed baseline roster — scored programmatic competitors, not filler NPCs.
     for (const baseline of BASELINE_ROSTER) {
-      specs.push({ id: baseline.id, displayName: baseline.displayName, isNpc: true });
+      specs.push({ id: baseline.id, displayName: baseline.displayName, isNpc: false });
+      this.roundAccounts.set(baseline.id, baseline.displayName);
+      this.roundQuality.set(baseline.id, freshQualityAcc());
       this.npc.set(baseline.id, { kind: baseline.kind, rng: new Rng(`${seed}:${baseline.id}`) });
     }
 
@@ -526,11 +532,9 @@ export class Arena {
       i += 1;
     }
 
-    // Ambient (no real agents) rounds run faster and end sooner so the attract
-    // loop keeps cycling; agent rounds use the full deadline and length.
-    const ambient = !this.roundHasAgents;
-    const tickMs = ambient ? this.serverConfig.ambientTickMs : this.config.tickDeadlineMs;
-    const maxTicks = ambient ? this.serverConfig.ambientMaxTicks : this.config.maxTicks;
+    // Baselines are always benchmark participants — full agent tick ceiling and length.
+    const tickMs = this.config.tickDeadlineMs;
+    const maxTicks = this.config.maxTicks;
 
     // Draw the rule card for this round (seeded, deterministic) and apply its
     // mechanical effects: head-to-head rule and food availability.
@@ -596,15 +600,10 @@ export class Arena {
       }
       waypoints = pts;
     } else if (card.objective === "bell") {
-      bellTick = Math.min(maxTicks, ambient ? Math.round(maxTicks * 0.7) : 120 + orng.int(120));
+      bellTick = Math.min(maxTicks, 120 + orng.int(120));
     }
-    // Every agent round gets a hard turn limit (a "bell"), not just the bell card.
-    // Because a round now runs until EVERY agent is out, a lone snake that simply
-    // never dies could otherwise keep a round going indefinitely. Reaching the
-    // limit ends the round and it is scored exactly as it stands (by the round's
-    // own objective). The randomized tick can't be hard-coded by an agent. Ambient
-    // (NPC-only) rounds already cap out via ambientMaxTicks, so they keep that.
-    if (!ambient && bellTick == null) {
+    // Every round gets a hard turn limit so a lone survivor cannot run forever.
+    if (bellTick == null) {
       bellTick = Math.min(maxTicks, 120 + orng.int(120));
     }
     const effectiveMaxTicks = bellTick ?? maxTicks;
@@ -772,7 +771,7 @@ export class Arena {
       }
     }
 
-    this.recordDecisionQuality(game);
+    this.recordDecisionQuality(game, moves);
 
     const events = game.step(moves);
 
@@ -795,11 +794,15 @@ export class Arena {
       const snake = game.snakeById(session.snakeId);
       if (snake && !snake.alive && session.alive) {
         session.alive = false;
-        // A death is "avoidable" if a safe move existed on the final decision.
         const acc = this.roundQuality.get(session.snakeId);
         if (acc && acc.lastSafeAlt) acc.avoidableDeath = true;
         session.send({ type: "dead", tick: game.tick, peak_size: snake.peakSize });
       }
+    }
+    for (const e of events) {
+      if (e.kind !== "death") continue;
+      const acc = this.roundQuality.get(e.id);
+      if (acc && acc.lastSafeAlt) acc.avoidableDeath = true;
     }
 
     // Track when the alive-snake count last changed, for stall detection.
@@ -856,7 +859,7 @@ export class Arena {
    * step using the move each agent actually submitted. Judges the move against
    * the real board (never the agent's self-reported evidence).
    */
-  private recordDecisionQuality(game: Game): void {
+  private recordDecisionQuality(game: Game, moves: Map<string, Direction>): void {
     if (this.roundQuality.size === 0) return;
     // Body cells that persist next tick: every alive snake's body except its
     // tail (tails vacate). Shared across all agents this tick.
@@ -871,6 +874,7 @@ export class Arena {
       const snake = game.snakeById(snakeId);
       if (!snake || !snake.alive) continue;
       const session = this.agents.get(snakeId);
+      const move = session?.pendingMove ?? moves.get(snakeId) ?? null;
       const ctx: MoveContext = {
         width: game.config.width,
         height: game.config.height,
@@ -878,7 +882,7 @@ export class Arena {
         blocked,
         head: snake.body[0]!,
         heading: snake.heading,
-        submittedMove: session?.pendingMove ?? null,
+        submittedMove: move,
         selfLength: snake.body.length,
         enemyHeads: allHeads
           .filter((h) => h.id !== snakeId)
@@ -918,7 +922,6 @@ export class Arena {
 
       // Server-authoritative move classification for the overlay colour (never
       // trusts the agent's own words for this).
-      const move = session?.pendingMove ?? null;
       const head = snake.body[0]!;
       const len = snake.body.length;
       // Local pressure + nearest rival. Any rival is a potential cut-off target
@@ -1054,14 +1057,13 @@ export class Arena {
       }
     }
     if (this.roundHasAgents) {
-      // A player round exists to measure the agents, so it runs until EVERY agent
-      // is out — not the instant one is left standing. A lone surviving agent
-      // keeps playing (and being scored) against any NPCs, or alone, until it
-      // dies, the tick cap, or a stalemate. (NPCs still circling don't matter.)
+      // Human/LLM round: run until every connected agent is out.
       if (this.aliveAgentCount(game) === 0) return "agents_eliminated";
-    } else if (alive === 1) {
-      // Ambient attract round (NPCs only): end when one snake is left standing.
-      return "last_standing";
+    } else {
+      // Baseline benchmark round (no human connected): run the full tick budget;
+      // end early only once every baseline is eliminated.
+      const anyBaselineAlive = BASELINE_ROSTER.some((b) => game.snakeById(b.id)?.alive);
+      if (!anyBaselineAlive) return "baselines_eliminated";
     }
     // Stalemate: a few survivors circling without dying. End so the next round
     // can start rather than waiting out the full tick cap.
@@ -1230,22 +1232,25 @@ export class Arena {
       const fieldSize = standings.length;
       const startingLength = this.config.startingLength;
 
-      // Build the rating field: real agents at their current rating, NPCs at
-      // their fixed anchor. Expand standings into pairwise Glicko-2 results.
+      // Build the rating field: scored participants (humans + baselines) at their
+      // current rating; filler NPCs at fixed anchors.
       const ratingField = standings.map((s) => {
+        const account = this.roundAccounts.get(s.id);
+        if (account) {
+          const r = stats.getRating(account);
+          return { id: s.id, rank: s.rank, rating: r.rating, rd: r.rd };
+        }
         if (s.is_npc) {
           const kind = this.npc.get(s.id)?.kind;
           const anchor = (kind && NPC_ANCHOR[kind]) || { rating: DEFAULT_RATING, rd: DEFAULT_RD };
           return { id: s.id, rank: s.rank, rating: anchor.rating, rd: anchor.rd };
         }
-        const account = this.roundAccounts.get(s.id)!;
-        const r = stats.getRating(account);
-        return { id: s.id, rank: s.rank, rating: r.rating, rd: r.rd };
+        return { id: s.id, rank: s.rank, rating: DEFAULT_RATING, rd: DEFAULT_RD };
       });
       const pairwise = expandStandings(ratingField);
 
       const entries: RoundEntry[] = standings
-        .filter((s) => !s.is_npc && this.roundAccounts.has(s.id))
+        .filter((s) => this.roundAccounts.has(s.id))
         .map((s) => {
           const acc = this.roundQuality.get(s.id);
           const snake = game.snakeById(s.id);
@@ -1262,8 +1267,6 @@ export class Arena {
             survivalTicks: survival,
             latencyMs: acc && acc.latencyCount ? acc.latencySum / acc.latencyCount : 0,
             lawMoves: acc?.lawMoves ?? 0,
-            // Law-aware safe-rate over law-round moves; null when this round had
-            // no law (nothing to comprehend), so it never dilutes the average.
             lawComprehension:
               acc && acc.lawMoves ? (acc.lawSafeOpp ? acc.lawSafeChosen / acc.lawSafeOpp : 1) : null,
           };

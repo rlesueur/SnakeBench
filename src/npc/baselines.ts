@@ -41,3 +41,9 @@ export const BASELINE_ROSTER: readonly BaselineNpc[] = [
 export const BASELINE_COUNT = BASELINE_ROSTER.length;
 
 export const BASELINE_KINDS = new Set<NpcKind>(BASELINE_ROSTER.map((b) => b.kind));
+
+export const BASELINE_IDS = new Set(BASELINE_ROSTER.map((b) => b.id));
+
+export function isBaselineId(id: string): boolean {
+  return BASELINE_IDS.has(id);
+}
