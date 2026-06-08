@@ -49,4 +49,4 @@ services:
 
 databases:
   - name: snakebench-db
-    plan: starter            # flat ~$7/mo managed Postgres
+    plan: basic-256mb            # flat ~$7/mo managed Postgres
