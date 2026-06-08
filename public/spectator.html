@@ -1229,7 +1229,8 @@
       setInterval(renderFeed, 300);
 
       function connect() {
-        const ws = new WebSocket(`ws://${location.host}/spectate`);
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const ws = new WebSocket(`${proto}://${location.host}/spectate`);
         ws.onopen = () => (els.status.textContent = "Connected");
         ws.onmessage = (ev) => {
           const msg = JSON.parse(ev.data);
