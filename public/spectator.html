@@ -790,8 +790,9 @@
       function updateDelibHud() {
         if (!think) { els.deliberateChip.style.display = "none"; return; }
         const remain = Math.max(0, think.ceiling - (performance.now() - think.start));
+        const locked = [...think.locked].filter((id) => think.ids.has(id)).length;
         els.delibInfo.textContent =
-          `Deliberating ${think.locked.size}/${think.ids.size} · ${(remain / 1000).toFixed(1)}s`;
+          `Deliberating ${locked}/${think.ids.size} · ${(remain / 1000).toFixed(1)}s`;
         els.deliberateChip.style.display = "inline-flex";
       }
 
@@ -1503,7 +1504,13 @@
         } else if (msg.type === "deliberation") {
           applyDeliberation(msg);
         } else if (msg.type === "locked_in") {
-          if (think && msg.tick === think.tick) think.locked.add(msg.id);
+          if (think && msg.tick === think.tick) {
+            think.locked.add(msg.id);
+            if (!think.ids.has(msg.id)) {
+              think.ids.add(msg.id);
+              if (msg.name) think.names.set(msg.id, msg.name);
+            }
+          }
         } else if (msg.type === "leaderboard") {
           applyDeltas(msg.deltas);
           renderStats(msg.board);

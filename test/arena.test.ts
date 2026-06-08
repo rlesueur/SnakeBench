@@ -90,6 +90,38 @@ describe("arena round lifecycle", () => {
     arena.stop();
   });
 
+  it("deliberation lists three baselines and resolves early once all lock in", () => {
+    const spectator: any[] = [];
+    const arena = new Arena(
+      { broadcastSpectators: (m) => spectator.push(m) },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 5000, maxTicks: 50, obstacleDensity: 0 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, roundRestartDelayMs: 1_000_000 },
+      null,
+      null,
+    );
+
+    arena.start();
+
+    const deliberation = spectator.find((m) => m.type === "deliberation");
+    expect(deliberation?.agents?.length).toBe(3);
+    expect(new Set(deliberation.agents.map((a: { name: string }) => a.name))).toEqual(
+      new Set(BASELINE_ROSTER.map((b) => b.displayName)),
+    );
+
+    const tick0Frames = spectator.filter((m) => m.type === "frame" && m.frame?.tick === 0);
+    expect(tick0Frames.length).toBe(1); // initial board only — not resolved yet
+
+    vi.advanceTimersByTime(1200);
+
+    const tick1Frames = spectator.filter((m) => m.type === "frame" && m.frame?.tick === 1);
+    expect(tick1Frames.length).toBeGreaterThan(0); // early resolve well before 5s ceiling
+
+    const lockedIns = spectator.filter((m) => m.type === "locked_in" && m.tick === 0);
+    expect(lockedIns.length).toBe(3);
+
+    arena.stop();
+  });
+
   it("ignores stale-tick actions but accepts current-tick moves", () => {
     const arena = new Arena(
       { broadcastSpectators: () => {} },

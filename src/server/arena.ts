@@ -364,6 +364,26 @@ export class Arena {
     };
   }
 
+  /** Scored competitors who must submit this tick: connected agents in the round
+   * plus the fixed baseline roster (Shelter / Stalker / Feast). Filler NPCs are
+   * excluded — they move on the ceiling without a deliberation beat. */
+  private deliberationRoster(): Array<{ id: string; name: string }> {
+    if (!this.game) return [];
+    const roster: Array<{ id: string; name: string }> = [];
+    for (const session of this.agents.values()) {
+      if (!this.roundAccounts.has(session.snakeId)) continue;
+      const snake = this.game.snakeById(session.snakeId);
+      if (!snake?.alive) continue;
+      roster.push({ id: session.snakeId, name: session.displayName });
+    }
+    for (const base of this.baselineSessions.values()) {
+      const snake = this.game.snakeById(base.snakeId);
+      if (!snake?.alive) continue;
+      roster.push({ id: base.snakeId, name: base.displayName });
+    }
+    return roster;
+  }
+
   /** Snapshot of an open agent decision window, for spectators joining mid-tick. */
   currentDeliberation():
     | {
@@ -375,13 +395,10 @@ export class Arena {
       }
     | null {
     if (!this.game || !this.roundActive || !this.deliberationStartedAt) return null;
-    const agents: Array<{ id: string; name: string }> = [];
+    const agents = this.deliberationRoster();
     const locked: string[] = [];
-    for (const snake of this.game.aliveSnakes()) {
-      const account = this.roundAccounts.get(snake.id);
-      if (!account) continue;
-      agents.push({ id: snake.id, name: account });
-      if (this.hasLockedMove(snake.id)) locked.push(snake.id);
+    for (const a of agents) {
+      if (this.hasLockedMove(a.id)) locked.push(a.id);
     }
     if (agents.length === 0) return null;
     return {
@@ -456,7 +473,12 @@ export class Arena {
     // Let spectators tick this snake over to "locked in" for the live beat (once
     // per tick — a resubmit just updates the move, not the lock-in state).
     if (firstThisTick) {
-      this.hooks.broadcastSpectators({ type: "locked_in", id: snakeId, tick });
+      this.hooks.broadcastSpectators({
+        type: "locked_in",
+        id: snakeId,
+        name: session.displayName,
+        tick,
+      });
     }
     // Server-measured decision latency for this move (state-sent -> action-in).
     session.lastLatencyMs = session.lastSentAt ? Date.now() - session.lastSentAt : null;
@@ -780,20 +802,28 @@ export class Arena {
     this.baselineTimers = [];
   }
 
-  /** Stagger baseline lock-ins across the tick ceiling so spectators see the same
-   * deliberation beat and countdown as for connected agents (not instant resolve). */
+  /** Stagger baseline lock-ins briefly so spectators see 0/3 → 3/3, then resolve
+   * as soon as every scored participant has submitted (not at the tick ceiling). */
   private scheduleBaselineSubmissions(): void {
     if (!this.game) return;
     const tick = this.game.tick;
+    const alive: string[] = [];
     for (const snake of this.game.aliveSnakes()) {
-      const base = this.baselineSessions.get(snake.id);
-      if (!base) continue;
-      const npc = this.npc.get(snake.id);
+      if (this.baselineSessions.has(snake.id)) alive.push(snake.id);
+    }
+    if (alive.length === 0) return;
+    // Cap total spread at ~1s regardless of tick ceiling (60s agents still see a
+    // quick baseline beat; short test ticks stay sub-ceiling).
+    const spread = Math.min(900, Math.max(80, Math.floor(this.currentTickMs * 0.015)));
+    const minMs = Math.max(1, Math.min(60, Math.floor(this.currentTickMs * 0.02)));
+    let i = 0;
+    for (const snakeId of alive) {
+      const npc = this.npc.get(snakeId);
       if (!npc) continue;
-      const minMs = Math.max(1, Math.floor(this.currentTickMs * 0.08));
-      const maxMs = Math.max(minMs, Math.floor(this.currentTickMs * 0.82));
-      const delay = minMs + npc.rng.int(maxMs - minMs + 1);
-      const timer = setTimeout(() => this.submitBaselineMove(snake.id, tick), delay);
+      const slot = alive.length > 1 ? Math.floor((i * spread) / (alive.length - 1)) : 0;
+      const delay = minMs + slot + npc.rng.int(Math.min(80, Math.max(1, Math.floor(spread / 8))));
+      i += 1;
+      const timer = setTimeout(() => this.submitBaselineMove(snakeId, tick), delay);
       this.baselineTimers.push(timer);
     }
   }
@@ -806,7 +836,12 @@ export class Arena {
     const npc = this.npc.get(snakeId);
     if (!npc) return;
     base.pendingMove = NPC_REGISTRY[npc.kind]!.decide(this.game, snakeId, npc.rng);
-    this.hooks.broadcastSpectators({ type: "locked_in", id: snakeId, tick });
+    this.hooks.broadcastSpectators({
+      type: "locked_in",
+      id: snakeId,
+      name: base.displayName,
+      tick,
+    });
     this.maybeResolveEarly();
   }
 
@@ -821,13 +856,10 @@ export class Arena {
    * thinking and the ceiling they have to answer within. */
   private broadcastDeliberation(): void {
     if (!this.game) return;
-    const agents: Array<{ id: string; name: string }> = [];
+    const agents = this.deliberationRoster();
     const locked: string[] = [];
-    for (const snake of this.game.aliveSnakes()) {
-      const account = this.roundAccounts.get(snake.id);
-      if (!account) continue;
-      agents.push({ id: snake.id, name: account });
-      if (this.hasLockedMove(snake.id)) locked.push(snake.id);
+    for (const a of agents) {
+      if (this.hasLockedMove(a.id)) locked.push(a.id);
     }
     if (agents.length === 0) return;
     this.deliberationStartedAt = Date.now();
@@ -841,16 +873,14 @@ export class Arena {
     });
   }
 
-  /** True once every scored live snake (human or baseline) has submitted. */
+  /** True once every scored live competitor (human or baseline) has submitted. */
   private allLiveAgentsLockedIn(): boolean {
-    if (!this.game) return false;
-    let live = 0;
-    for (const snake of this.game.aliveSnakes()) {
-      if (!this.roundAccounts.has(snake.id)) continue;
-      live += 1;
-      if (!this.hasLockedMove(snake.id)) return false;
+    const roster = this.deliberationRoster();
+    if (roster.length === 0) return false;
+    for (const a of roster) {
+      if (!this.hasLockedMove(a.id)) return false;
     }
-    return live > 0;
+    return true;
   }
 
   /** Called after an agent submits: if all live agents are now locked in, resolve
