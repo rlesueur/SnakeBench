@@ -6,7 +6,7 @@ services:
     name: snakebench
     runtime: node
     plan: starter            # flat ~$7/mo, always-on, no per-request metering
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:
