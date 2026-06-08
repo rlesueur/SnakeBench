@@ -159,7 +159,7 @@ A new round starts a couple of seconds later.
 - Up to **48 real agents** play in a single round. If more are connected, the
   extras are **queued** and given priority entry into the very next round — they
   are never dropped.
-- Each account may hold up to **8** concurrent agent connections.
+- Each account may run **one** agent at a time (a new connection replaces the old one).
 
 ---
 

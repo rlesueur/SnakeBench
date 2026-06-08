@@ -8,6 +8,7 @@ import {
 } from "../config.js";
 import { Game, type SnakeSpec } from "../engine/game.js";
 import { Rng } from "../rng.js";
+import { BASELINE_COUNT, BASELINE_KINDS, BASELINE_ROSTER } from "../npc/baselines.js";
 import { NPC_REGISTRY, NPC_ANCHOR, type NpcKind } from "../npc/bots.js";
 import { DIRECTIONS, DELTA, type Direction, type Cell, type Snake, cellKey } from "../types.js";
 import { analyseMove, type MoveContext, SPACE_CAP } from "../engine/decision-quality.js";
@@ -502,16 +503,23 @@ export class Arena {
     }
 
     this.npc = new Map();
-    const { minSnakes, npcFloor, npcBackfill } = this.serverConfig;
-    // NPCs fill the lobby up to minSnakes when few agents are online, then taper
-    // to a small anchor floor as more real players join.
+    const { minSnakes, npcBackfill } = this.serverConfig;
     const agentCount = specs.length;
     this.roundHasAgents = agentCount > 0;
-    const npcCount = Math.max(npcFloor, minSnakes - agentCount);
-    const target = agentCount + npcCount;
+
+    // Fixed baseline roster — always present so there is always competition.
+    for (const baseline of BASELINE_ROSTER) {
+      specs.push({ id: baseline.id, displayName: baseline.displayName, isNpc: true });
+      this.npc.set(baseline.id, { kind: baseline.kind, rng: new Rng(`${seed}:${baseline.id}`) });
+    }
+
+    // Extra filler NPCs top the lobby up to minSnakes when few agents are online.
+    const fillerKinds = npcBackfill.filter((k) => !BASELINE_KINDS.has(k as NpcKind));
+    const backfill = fillerKinds.length ? fillerKinds : npcBackfill;
+    const target = agentCount + Math.max(BASELINE_COUNT, minSnakes - agentCount);
     let i = 0;
     while (specs.length < target) {
-      const kind = npcBackfill[i % npcBackfill.length] as NpcKind;
+      const kind = backfill[i % backfill.length] as NpcKind;
       const id = `npc_${kind}_${i + 1}`;
       specs.push({ id, displayName: `npc_${kind}`, isNpc: true });
       this.npc.set(id, { kind, rng: new Rng(`${seed}:${id}`) });

@@ -138,9 +138,9 @@ export interface ServerConfig {
   port: number;
   /** Target lobby size when few agents are online; NPCs backfill up to this. */
   minSnakes: number;
-  /** Minimum NPCs kept as rating anchors, even in a busy player lobby. */
+  /** @deprecated Baseline count is fixed in `BASELINE_ROSTER`; kept for compat. */
   npcFloor: number;
-  /** NPC kinds used to backfill, cycled in order. */
+  /** Extra NPC kinds cycled to fill the lobby beyond the fixed baselines. */
   npcBackfill: string[];
   /** Pause between a round ending and the next starting, in ms. */
   roundRestartDelayMs: number;
@@ -168,8 +168,8 @@ export interface ServerConfig {
 export const DEFAULT_SERVER_CONFIG: ServerConfig = {
   port: 8080,
   minSnakes: 16,
-  npcFloor: 2,
-  npcBackfill: ["greedy", "survivor", "hunter", "glutton", "searcher"],
+  npcFloor: 3,
+  npcBackfill: ["greedy", "searcher"],
   roundRestartDelayMs: 2000,
   joinGraceMs: 2000,
   cellsPerSnake: 180,

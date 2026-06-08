@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BASELINE_ROSTER } from "../src/npc/baselines.js";
 import { Arena, type AgentSession } from "../src/server/arena.js";
 import { DEFAULT_CONFIG, DEFAULT_SERVER_CONFIG } from "../src/config.js";
 
@@ -54,13 +55,37 @@ describe("arena round lifecycle", () => {
     expect(end).toBeTruthy();
     expect(end.reason).toBe("time_limit");
     expect(Array.isArray(end.standings)).toBe(true);
-    expect(end.standings.length).toBe(2);
+    expect(end.standings.length).toBe(5); // 2 agents + 3 fixed baselines
 
     // Spectator frames carry the events + notes channels (arrays, possibly empty).
     const frame = spectator.find((m) => m.type === "frame");
     expect(frame).toBeTruthy();
     expect(Array.isArray(frame.events)).toBe(true);
     expect(Array.isArray(frame.notes)).toBe(true);
+
+    arena.stop();
+  });
+
+  it("always includes the three baseline NPCs, even with no agents connected", () => {
+    const spectator: any[] = [];
+    const arena = new Arena(
+      { broadcastSpectators: (m) => spectator.push(m) },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 10, maxTicks: 1, obstacleDensity: 0 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, ambientTickMs: 10, ambientMaxTicks: 1, roundRestartDelayMs: 1_000_000 },
+      null,
+      null,
+    );
+
+    arena.start();
+
+    const frame = spectator.find((m) => m.type === "frame");
+    expect(frame).toBeTruthy();
+    const names = new Set(frame.frame.snakes.map((s: { displayName: string }) => s.displayName));
+    for (const b of BASELINE_ROSTER) expect(names.has(b.displayName)).toBe(true);
+
+    vi.advanceTimersByTime(60);
+    const end = spectator.find((m) => m.type === "round_end");
+    expect(end?.standings?.length).toBe(3);
 
     arena.stop();
   });

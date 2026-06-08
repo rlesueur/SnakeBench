@@ -20,6 +20,11 @@ services:
       # see the real client IP.
       - key: TRUST_PROXY
         value: "1"
+      # Abuse limits (optional overrides; server defaults shown).
+      - key: MAX_AGENT_CONNECTIONS
+        value: "100"
+      - key: AGENT_MSGS_PER_MIN
+        value: "120"
       # Signed-cookie session secret — generated and kept by Render (256-bit,
       # well over the 32-char minimum the server enforces in production).
       - key: SESSION_SECRET

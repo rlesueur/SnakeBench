@@ -36,6 +36,10 @@ const SPECTATOR_PER_IP = Number(process.env.SPECTATOR_PER_IP) || 8;
 const AGENT_HANDSHAKES_PER_MIN = Number(process.env.AGENT_HANDSHAKES_PER_MIN) || 120;
 const SPECTATOR_MAX_FPS = Number(process.env.SPECTATOR_MAX_FPS) || 8;
 const AGENT_IDLE_MS = Number(process.env.AGENT_IDLE_MS) || 30_000;
+// Max inbound agent WS messages per connection per minute (JSON frames, any type).
+const AGENT_MSGS_PER_MIN = Number(process.env.AGENT_MSGS_PER_MIN) || 120;
+// Global cap on distinct agent WebSocket connections (one per account).
+const MAX_AGENT_CONNECTIONS = Number(process.env.MAX_AGENT_CONNECTIONS) || 100;
 const ALLOW_STATIC_KEYS = process.env.ALLOW_STATIC_KEYS === "1";
 
 const users = new UserStore();
@@ -234,6 +238,10 @@ const httpServer = createServer(async (req, res) => {
   }
 
   if (path === "/api/leaderboard") {
+    if (!rateLimit(`lb:${ip}`, 60)) {
+      sendJson(res, 429, { error: "Too many requests." });
+      return;
+    }
     sendJson(res, 200, arena.leaderboard());
     return;
   }
@@ -453,6 +461,12 @@ httpServer.on("upgrade", async (req, socket, head) => {
     // One bot per account: a fresh connection replaces the account's existing one
     // (newest wins). The prior socket is force-closed so it cannot keep playing.
     const accountKey = accountKeyOf(identity);
+    const replacing = agentWsByAccount.has(accountKey);
+    if (!replacing && agentWsByAccount.size >= MAX_AGENT_CONNECTIONS) {
+      socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+      socket.destroy();
+      return;
+    }
     const existing = agentWsByAccount.get(accountKey);
     if (existing) {
       try { existing.close(4005, "replaced by a newer connection for this account"); } catch { /* ignore */ }
@@ -527,8 +541,20 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
   arena.addAgent(session);
   console.log(`Agent connected: ${snakeId}`);
 
+  let msgCount = 0;
+  let msgWindowReset = Date.now() + 60_000;
   ws.on("message", (raw) => {
-    resetIdle();
+    const now = Date.now();
+    if (now > msgWindowReset) {
+      msgCount = 0;
+      msgWindowReset = now + 60_000;
+    }
+    msgCount += 1;
+    if (msgCount > AGENT_MSGS_PER_MIN) {
+      ws.close(4429, "message rate limit exceeded");
+      return;
+    }
+
     let msg: {
       type?: string;
       tick?: number;
@@ -544,6 +570,7 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
       return;
     }
     if (msg.type === "action" && typeof msg.tick === "number" && typeof msg.move === "string") {
+      resetIdle();
       const note = typeof msg.note === "string" ? msg.note : null;
       arena.submitAction(
         snakeId,
@@ -598,8 +625,17 @@ function checkSessionSecret(): void {
   console.warn(`WARNING: ${msg} Generate one with: openssl rand -hex 32`);
 }
 
-async function main(): Promise<void> {
+/** Refuse unsafe production configuration before accepting traffic. */
+function checkProductionGuardrails(): void {
   checkSessionSecret();
+  if (process.env.NODE_ENV === "production" && ALLOW_STATIC_KEYS) {
+    console.error("FATAL: ALLOW_STATIC_KEYS=1 is forbidden in production. Refusing to start.");
+    process.exit(1);
+  }
+}
+
+async function main(): Promise<void> {
+  checkProductionGuardrails();
   await migrate();
   await stats.init();
   httpServer.listen(serverConfig.port, () => {
@@ -610,7 +646,8 @@ async function main(): Promise<void> {
     console.log(`  Agent WS:        ws://localhost:${serverConfig.port}/agent  (Authorization: Bearer YOUR_KEY)`);
     console.log(`  Google sign-in:  ${google.isConfigured() ? "configured" : "NOT configured"}`);
     console.log(`  Trust proxy XFF: ${TRUST_PROXY ? "yes" : "no"}`);
-    console.log(`  Tick deadline:   ${config.tickDeadlineMs} ms\n`);
+    console.log(`  Tick deadline:   ${config.tickDeadlineMs} ms`);
+    console.log(`  Agent limits:    ${MAX_AGENT_CONNECTIONS} connections, ${AGENT_MSGS_PER_MIN} msgs/min/conn\n`);
   });
 }
 
@@ -628,14 +665,15 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-// Last-resort guards: a single stray error in a timer/async path should not
-// take the whole always-on arena down. Log loudly and keep serving; the round
-// loop has its own try/catch so play continues on the next round.
+// In production, exit on unexpected errors so the PaaS restarts a clean process.
+// In dev, log and keep serving so local debugging is not interrupted.
 process.on("uncaughtException", (err) => {
-  console.error("uncaughtException (continuing):", err);
+  console.error("uncaughtException:", err);
+  if (process.env.NODE_ENV === "production") void shutdown("uncaughtException");
 });
 process.on("unhandledRejection", (reason) => {
-  console.error("unhandledRejection (continuing):", reason);
+  console.error("unhandledRejection:", reason);
+  if (process.env.NODE_ENV === "production") void shutdown("unhandledRejection");
 });
 
 main().catch((err) => {
