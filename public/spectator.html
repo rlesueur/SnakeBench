@@ -42,6 +42,8 @@
       .chip.title { font-size: 15px; letter-spacing: .2px; }
       a.chip.link { text-decoration: none; color: #bfe0ff; cursor: pointer; }
       a.chip.link:hover { border-color: #5fd0ff; color: #eaf4fb; }
+      a.chip.link.signed-in { border-color: rgba(95, 227, 155, 0.4); color: #d6f5e4; }
+      a.chip.link.signed-in:hover { border-color: rgba(95, 227, 155, 0.65); color: #eaf4fb; }
       #followChip { display: none; gap: 8px; align-items: center; }
       #followChip.on { display: inline-flex; }
       #followChip .x { cursor: pointer; opacity: .7; font-weight: 700; }
@@ -185,15 +187,91 @@
         box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
       }
       #minimap { display: block; cursor: pointer; border-radius: 6px; }
+
+      /* Connection overlay — shown until the first live game state arrives. */
+      #connOverlay {
+        position: fixed; inset: 0; z-index: 20;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(4, 12, 20, 0.82);
+        backdrop-filter: blur(6px);
+        transition: opacity .35s ease, visibility .35s ease;
+      }
+      #connOverlay.hidden {
+        opacity: 0; visibility: hidden; pointer-events: none;
+      }
+      .conn-panel {
+        max-width: 420px; margin: 16px; padding: 28px 32px;
+        text-align: center;
+        background: rgba(11, 30, 44, 0.92);
+        border: 1px solid rgba(120, 180, 220, 0.28);
+        border-radius: 18px;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+      }
+      .conn-spinner {
+        width: 36px; height: 36px; margin: 0 auto 18px;
+        border: 3px solid rgba(95, 208, 255, 0.18);
+        border-top-color: #5fd0ff;
+        border-radius: 50%;
+        animation: connSpin .85s linear infinite;
+      }
+      @keyframes connSpin { to { transform: rotate(360deg); } }
+      .conn-title { margin: 0 0 8px; font-size: 18px; font-weight: 700; color: #eaf4fb; }
+      .conn-detail { margin: 0; font-size: 13px; line-height: 1.5; color: #9fc6dc; }
+      .chip.conn-live { border-color: rgba(95, 227, 155, 0.45); }
+      .chip.conn-wait { border-color: rgba(255, 210, 122, 0.45); color: #ffe8b8; }
+      .chip.conn-off { border-color: rgba(255, 123, 123, 0.45); color: #ffc9c9; }
+      .chip .conn-dot {
+        display: inline-block; width: 8px; height: 8px; margin-right: 6px;
+        border-radius: 50%; vertical-align: middle;
+      }
+      .chip.conn-live .conn-dot { background: #5fe39b; box-shadow: 0 0 8px #5fe39b; }
+      .chip.conn-wait .conn-dot { background: #ffd27a; box-shadow: 0 0 8px #ffd27a; animation: connPulse 1.2s ease-in-out infinite; }
+      .chip.conn-off .conn-dot { background: #ff7b7b; box-shadow: 0 0 8px #ff7b7b; }
+      @keyframes connPulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+      /* Between-round / starting intermission — dim overlay, not a hard disconnect. */
+      #intermission {
+        position: fixed; inset: 0; z-index: 3;
+        display: flex; align-items: center; justify-content: center;
+        pointer-events: none;
+        background: rgba(4, 12, 20, 0.42);
+      }
+      #intermission.hidden { display: none; }
+      .intermission-panel {
+        padding: 18px 28px;
+        background: rgba(11, 30, 44, 0.9);
+        border: 1px solid rgba(120, 180, 220, 0.28);
+        border-radius: 14px;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+        text-align: center;
+        max-width: 420px;
+      }
+      .intermission-title { margin: 0 0 6px; font-size: 17px; font-weight: 700; color: #eaf4fb; }
+      .intermission-detail { margin: 0; font-size: 13px; line-height: 1.45; color: #9fc6dc; }
     </style>
   </head>
   <body>
     <canvas id="board"></canvas>
     <div id="vignette"></div>
 
+    <div id="connOverlay" aria-live="polite">
+      <div class="conn-panel">
+        <div class="conn-spinner" id="connSpinner"></div>
+        <p class="conn-title" id="connTitle">Connecting to live arena…</p>
+        <p class="conn-detail" id="connDetail">The server may take a moment to wake up on first load.</p>
+      </div>
+    </div>
+
+    <div id="intermission" class="hidden" aria-live="polite">
+      <div class="intermission-panel">
+        <p class="intermission-title" id="intermissionTitle">Next round</p>
+        <p class="intermission-detail" id="intermissionDetail">Starting shortly…</p>
+      </div>
+    </div>
+
     <div id="hud" class="overlay">
       <span class="chip title">SnakeBench</span>
-      <a class="chip link" href="/account.html">Sign in / Account</a>
+      <a class="chip link" id="accountLink" href="/account.html" title="Sign in or manage your account"><span id="accountLabel">Sign in / Account</span></a>
       <a class="chip link" href="/guide.html">How to play</a>
       <a class="chip link" href="/faq.html">Rules &amp; FAQ</a>
       <span class="chip">Round <b id="round">–</b> · Tick <b id="tick">0</b> · <b id="alive">0</b> alive</span>
@@ -223,7 +301,7 @@
     <div id="feed" class="overlay"></div>
 
     <div id="foot" class="overlay">
-      <span class="chip" id="status">Connecting…</span>
+      <span class="chip conn-wait" id="status"><span class="conn-dot"></span><span id="statusText">Connecting…</span></span>
       <span class="chip">
         <span class="dotleg"><i style="background:#ffe34d;box-shadow:0 0 8px #ffe34d"></i>food +1</span>&nbsp;
         <span class="dotleg"><i style="background:#ff8f3a;box-shadow:0 0 8px #ff8f3a"></i>+3</span>&nbsp;
@@ -257,7 +335,17 @@
         lbPager: document.getElementById("lbPager"),
         stats: document.getElementById("stats"),
         statsPager: document.getElementById("statsPager"),
+        accountLink: document.getElementById("accountLink"),
+        accountLabel: document.getElementById("accountLabel"),
         status: document.getElementById("status"),
+        statusText: document.getElementById("statusText"),
+        connOverlay: document.getElementById("connOverlay"),
+        connTitle: document.getElementById("connTitle"),
+        connDetail: document.getElementById("connDetail"),
+        connSpinner: document.getElementById("connSpinner"),
+        intermission: document.getElementById("intermission"),
+        intermissionTitle: document.getElementById("intermissionTitle"),
+        intermissionDetail: document.getElementById("intermissionDetail"),
         followChip: document.getElementById("followChip"),
         followName: document.getElementById("followName"),
         feed: document.getElementById("feed"),
@@ -430,13 +518,30 @@
         requestAnimationFrame(loop);
       }
 
+      let intermissionActive = false;
+
+      function showIntermission(title, detail) {
+        intermissionActive = true;
+        els.intermissionTitle.textContent = title;
+        els.intermissionDetail.textContent = detail;
+        els.intermission.classList.remove("hidden");
+      }
+
+      function hideIntermission() {
+        intermissionActive = false;
+        els.intermission.classList.add("hidden");
+      }
+
       function draw() {
         ctx.clearRect(0, 0, W, H);
+
+        const dimBoard = intermissionActive && cur;
 
         // Board panel (world bounds) drawn in screen space.
         const bx = sx(0), by = sy(0);
         const bw = world.width * cam.scale, bh = world.height * cam.scale;
         ctx.save();
+        if (dimBoard) ctx.globalAlpha = 0.58;
         ctx.beginPath();
         ctx.roundRect(bx, by, bw, bh, Math.min(16, cam.scale * 2));
         const g = ctx.createRadialGradient(bx + bw / 2, by + bh * 0.4, 0, bx + bw / 2, by + bh * 0.4, Math.max(bw, bh));
@@ -554,6 +659,8 @@
           }
         }
         ctx.restore();
+
+        if (dimBoard) ctx.globalAlpha = 1;
 
         // Play-boundary rim.
         ctx.save();
@@ -1127,19 +1234,35 @@
 
       // --- between-round countdown ---
       let countdownTimer = null;
+      let countdownEndsAt = 0;
+      let countdownBase = "";
+      let countdownDetail = "";
+
       function clearCountdown() {
         if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+        countdownEndsAt = 0;
       }
-      function startCountdown(baseText, ms) {
+
+      function startIntermission(title, detail, ms) {
         clearCountdown();
-        let remaining = Math.ceil(ms / 1000);
+        if (!ms || ms <= 0) {
+          showIntermission(title, detail);
+          return;
+        }
+        countdownBase = title;
+        countdownDetail = detail;
+        countdownEndsAt = performance.now() + ms;
+        showIntermission(title, detail);
         const tick = () => {
-          if (remaining <= 0) { clearCountdown(); els.status.textContent = baseText; return; }
-          els.status.textContent = `${baseText} · next round in ${remaining}s`;
-          remaining -= 1;
+          const remain = Math.max(0, countdownEndsAt - performance.now());
+          const secs = Math.ceil(remain / 1000);
+          const line = remain > 0 ? `${countdownDetail} · ${secs}s` : countdownDetail;
+          showIntermission(countdownBase, line);
+          if (live && synced) setConnChip("live", remain > 0 ? `${countdownBase} · ${secs}s` : countdownBase);
+          if (remain <= 0) clearCountdown();
         };
         tick();
-        countdownTimer = setInterval(tick, 1000);
+        countdownTimer = setInterval(tick, 250);
       }
 
       // --- live kill / commentary feed (game events only — no per-tick chatter) ---
@@ -1228,83 +1351,326 @@
       }
       setInterval(renderFeed, 300);
 
+      let live = false;
+      let connAttempts = 0;
+      let activeWs = null;
+      let reconnectTimer = null;
+      let initTimer = null;
+      let synced = false;
+      let everSynced = false;
+      const INIT_TIMEOUT_MS = 20_000;
+      const RETRY_BASE_MS = 1000;
+      const RETRY_MAX_MS = 30_000;
+
+      function retryDelayMs() {
+        return Math.min(RETRY_MAX_MS, Math.round(RETRY_BASE_MS * Math.pow(1.6, Math.min(connAttempts - 1, 8))));
+      }
+
+      function clearReconnectTimer() {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      }
+
+      function clearInitTimer() {
+        if (initTimer) { clearTimeout(initTimer); initTimer = null; }
+      }
+
+      function detachWs(ws) {
+        ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
+      }
+
+      function closeActiveWs() {
+        clearInitTimer();
+        if (!activeWs) return;
+        const ws = activeWs;
+        activeWs = null;
+        detachWs(ws);
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          try { ws.close(); } catch { /* ignore */ }
+        }
+      }
+
+      function scheduleReconnect(ms) {
+        clearReconnectTimer();
+        reconnectTimer = setTimeout(() => connect(), ms);
+      }
+
+      function setConnChip(kind, text) {
+        els.status.className = "chip conn-" + kind;
+        els.statusText.textContent = text;
+      }
+
+      /** Full-screen overlay + footer chip while we are not receiving live data. */
+      function setConnState(state, title, detail) {
+        if (title) els.connTitle.textContent = title;
+        if (detail != null) els.connDetail.textContent = detail;
+        if (state === "live") {
+          live = true;
+          els.connOverlay.classList.add("hidden");
+          setConnChip("live", "Live");
+          return;
+        }
+        if (state === "waiting") {
+          live = true;
+          els.connOverlay.classList.add("hidden");
+          setConnChip("wait", "Waiting for round…");
+          return;
+        }
+        live = false;
+        synced = false;
+        els.connSpinner.style.display = "";
+        if (everSynced) {
+          if (state === "connecting") setConnChip("wait", connAttempts > 1 ? `Reconnecting… (${connAttempts})` : "Reconnecting…");
+          else setConnChip("off", "Connection lost · retrying");
+          return;
+        }
+        els.connOverlay.classList.remove("hidden");
+        if (state === "connecting") setConnChip("wait", connAttempts > 1 ? `Connecting… (attempt ${connAttempts})` : "Connecting…");
+        else setConnChip("off", connAttempts > 1 ? `Disconnected · retry ${connAttempts}` : "Disconnected");
+      }
+
+      function applyInit(msg) {
+        connAttempts = 0;
+        synced = true;
+        everSynced = true;
+        clearInitTimer();
+        if (msg.round != null) els.round.textContent = msg.round;
+        if (msg.waiting) {
+          setConnState(
+            "waiting",
+            msg.intermission ? "Connected — between rounds" : "Connected — waiting for the arena",
+            msg.intermission
+              ? "The last round has finished. The next one will start automatically."
+              : "The arena is starting up. A new round will begin shortly.",
+          );
+          if (msg.intermission && msg.frame) {
+            obstacles = msg.obstacles || [];
+            if (msg.world) setWorld(msg.world);
+            ingestFrame(msg.frame);
+            if (msg.rules) renderRules(msg.rules);
+            renderLeaderboard();
+          } else {
+            prev = null;
+            cur = null;
+          }
+          if (msg.next_round_in_ms) {
+            startIntermission("Next round starting", "Please wait", msg.next_round_in_ms);
+          } else if (msg.intermission) {
+            showIntermission("Between rounds", "Waiting for the next round…");
+          } else {
+            hideIntermission();
+          }
+          return;
+        }
+        hideIntermission();
+        clearCountdown();
+        setConnState("live");
+        obstacles = msg.obstacles || [];
+        if (msg.world) setWorld(msg.world);
+        if (msg.frame) {
+          ingestFrame(msg.frame);
+          els.tick.textContent = msg.frame.tick;
+        }
+        if (msg.rules) renderRules(msg.rules);
+        applyDeliberation(msg.deliberation);
+        renderLeaderboard();
+      }
+
+      function handleSpectatorMsg(msg) {
+        if (msg.type === "init") {
+          applyInit(msg);
+        } else if (msg.type === "round_start") {
+          if (!synced) applyInit({ waiting: false, intermission: false, round: msg.round, world: msg.world, obstacles: msg.obstacles, frame: null, rules: msg.rules, deliberation: null, next_round_in_ms: null });
+          clearCountdown();
+          think = null;
+          sayState.clear();
+          obstacles = msg.obstacles || [];
+          feed = []; renderFeed();
+          setWorld(msg.world);
+          renderRules(msg.rules);
+          els.round.textContent = msg.round;
+          showIntermission(`Round ${msg.round}`, "Dealing the board…");
+          setConnChip("live", `Round ${msg.round} starting…`);
+        } else if (msg.type === "frame") {
+          if (!synced) applyInit({ waiting: false, intermission: false, round: msg.frame?.round, world: cur?.world || world, obstacles, frame: msg.frame, rules: currentRules, deliberation: null, next_round_in_ms: null });
+          hideIntermission();
+          clearCountdown();
+          setConnState("live");
+          think = null;
+          ingestFrame(msg.frame, msg.notes);
+          ingestEvents(msg.events);
+          casterFromNotes(cur.notes);
+          els.tick.textContent = msg.frame.tick;
+        } else if (msg.type === "deliberation") {
+          applyDeliberation(msg);
+        } else if (msg.type === "locked_in") {
+          if (think && msg.tick === think.tick) think.locked.add(msg.id);
+        } else if (msg.type === "leaderboard") {
+          applyDeltas(msg.deltas);
+          renderStats(msg.board);
+          return;
+        } else if (msg.type === "round_end") {
+          think = null;
+          if (msg.rules) renderRules(msg.rules);
+          const why = {
+            all_dead: "everyone died",
+            last_standing: "last snake standing",
+            agents_eliminated: "all agents out",
+            baselines_eliminated: "all baselines out",
+            time_limit: "time limit",
+            stalemate: "stalemate",
+            bell: "the bell",
+            objective_complete: "objective complete",
+          }[msg.reason] || msg.reason || "";
+          const top = msg.standings[0]?.display_name ?? "?";
+          const title = `Round ${msg.round}: ${top} won`;
+          const detail = why ? `(${why})` : "";
+          const h = msg.highlights;
+          if (h) {
+            if (h.survivor) {
+              pushFeed(`🏆 ${nm(h.survivor.name)} survived to tick ${h.survivor.ticks}`, "frenzy");
+            }
+            if (h.topKiller) {
+              pushFeed(`🔥 ${nm(h.topKiller.name)} — ${h.topKiller.kills} kill${h.topKiller.kills === 1 ? "" : "s"}`, "kill");
+            }
+          }
+          if (msg.next_round_in_ms) {
+            startIntermission(title, detail || "Next round starting", msg.next_round_in_ms);
+          } else if (live) {
+            showIntermission(title, detail || "Round complete");
+            setConnChip("live", title);
+          }
+        }
+        if (cur) renderLeaderboard();
+      }
+
       function connect() {
+        clearReconnectTimer();
+        closeActiveWs();
+        synced = false;
+        connAttempts += 1;
+        const delay = retryDelayMs();
+        setConnState(
+          "connecting",
+          connAttempts > 1 ? "Reconnecting to live arena…" : "Connecting to live arena…",
+          connAttempts > 1
+            ? `Attempt ${connAttempts}. Retrying with backoff (${Math.round(delay / 1000)}s between tries).`
+            : "The server may take a moment to wake up on first load.",
+        );
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const ws = new WebSocket(`${proto}://${location.host}/spectate`);
-        ws.onopen = () => (els.status.textContent = "Connected");
+        activeWs = ws;
+
+        initTimer = setTimeout(() => {
+          if (ws !== activeWs || synced) return;
+          detachWs(ws);
+          if (activeWs === ws) activeWs = null;
+          try { ws.close(); } catch { /* ignore */ }
+          setConnState(
+            "disconnected",
+            "Timed out waiting for the server",
+            "No game state arrived. Retrying…",
+          );
+          scheduleReconnect(delay);
+        }, INIT_TIMEOUT_MS);
+
+        ws.onopen = () => {
+          if (ws !== activeWs || synced) return;
+          setConnState(
+            "connecting",
+            "Connected — loading game…",
+            "Waiting for the current round state from the server.",
+          );
+          setConnChip("wait", "Loading…");
+        };
+        ws.onerror = () => {
+          if (ws !== activeWs || synced) return;
+          setConnState(
+            "connecting",
+            "Connection trouble…",
+            "Could not reach the server. Retrying shortly.",
+          );
+        };
         ws.onmessage = (ev) => {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === "init") {
-            obstacles = msg.obstacles || [];
-            setWorld(msg.world);
-            ingestFrame(msg.frame);
-            renderRules(msg.rules);
-            if (msg.round != null) els.round.textContent = msg.round;
-            if (msg.frame) els.tick.textContent = msg.frame.tick;
-            applyDeliberation(msg.deliberation);
-          } else if (msg.type === "round_start") {
-            clearCountdown();
-            think = null;
-            sayState.clear();
-            obstacles = msg.obstacles || [];
-            prev = null; cur = null;
-            feed = []; renderFeed();
-            setWorld(msg.world);
-            renderRules(msg.rules);
-            els.round.textContent = msg.round;
-          } else if (msg.type === "frame") {
-            think = null; // reveal: drop the thinking overlay until the next window
-            ingestFrame(msg.frame, msg.notes);
-            ingestEvents(msg.events);
-            casterFromNotes(cur.notes);
-            els.tick.textContent = msg.frame.tick;
-          } else if (msg.type === "deliberation") {
-            applyDeliberation(msg);
-          } else if (msg.type === "locked_in") {
-            if (think && msg.tick === think.tick) think.locked.add(msg.id);
-          } else if (msg.type === "leaderboard") {
-            applyDeltas(msg.deltas);
-            renderStats(msg.board);
-            return;
-          } else if (msg.type === "round_end") {
-            think = null;
-            if (msg.rules) renderRules(msg.rules);
-            const why = {
-              all_dead: "everyone died",
-              last_standing: "last snake standing",
-              agents_eliminated: "all agents out",
-              time_limit: "time limit",
-              stalemate: "stalemate",
-              bell: "the bell",
-              objective_complete: "objective complete",
-            }[msg.reason] || msg.reason || "";
-            const top = msg.standings[0]?.display_name ?? "?";
-            const base = `Round ${msg.round}: ${top} won${why ? " (" + why + ")" : ""}`;
-            // Round-end highlights in the feed.
-            const h = msg.highlights;
-            if (h) {
-              if (h.survivor) {
-                pushFeed(`🏆 ${nm(h.survivor.name)} survived to tick ${h.survivor.ticks}`, "frenzy");
-              }
-              if (h.topKiller) {
-                pushFeed(`🔥 ${nm(h.topKiller.name)} — ${h.topKiller.kills} kill${h.topKiller.kills === 1 ? "" : "s"}`, "kill");
-              }
-            }
-            if (msg.next_round_in_ms) startCountdown(base, msg.next_round_in_ms);
-            else els.status.textContent = base;
-          }
-          if (cur) renderLeaderboard();
+          if (ws !== activeWs) return;
+          try {
+            handleSpectatorMsg(JSON.parse(ev.data));
+          } catch { /* malformed frame — ignore */ }
         };
         ws.onclose = () => {
-          els.status.textContent = "Disconnected — retrying…";
-          setTimeout(connect, 1000);
+          if (ws !== activeWs) return;
+          activeWs = null;
+          clearInitTimer();
+          if (synced) {
+            setConnState(
+              "disconnected",
+              "Connection lost",
+              "Retrying automatically…",
+            );
+            scheduleReconnect(RETRY_BASE_MS);
+          } else {
+            setConnState(
+              "disconnected",
+              "Not connected",
+              `Could not connect. Retrying in ${Math.round(delay / 1000)}s…`,
+            );
+            scheduleReconnect(delay);
+          }
         };
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible") return;
+        if (!navigator.onLine) return;
+        if (!activeWs || activeWs.readyState === WebSocket.CLOSED) connect();
+        else if (!synced && activeWs.readyState === WebSocket.OPEN) connect();
+      });
+
+      window.addEventListener("online", () => {
+        if (!activeWs || activeWs.readyState !== WebSocket.OPEN || !synced) connect();
+      });
+
+      async function wakeServer() {
+        for (let i = 0; i < 6; i++) {
+          try {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 8000);
+            const res = await fetch("/healthz", { signal: ctrl.signal, cache: "no-store" });
+            clearTimeout(timer);
+            if (res.ok) return true;
+          } catch { /* server still waking */ }
+          if (i < 5) await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+        }
+        return false;
+      }
+
+      async function bootSpectator() {
+        loadAccountChip();
+        setConnState(
+          "connecting",
+          "Waking the arena…",
+          "Checking the server is ready before opening the live feed.",
+        );
+        await wakeServer();
+        connect();
+      }
+
+      async function loadAccountChip() {
+        try {
+          const res = await fetch("/api/auth/status");
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data.signedIn && data.account) {
+            els.accountLabel.textContent = data.account;
+            els.accountLink.title = `Signed in as ${data.account} — view your account`;
+            els.accountLink.classList.add("signed-in");
+          }
+        } catch { /* offline or server waking — keep default label */ }
       }
 
       window.addEventListener("resize", resize);
       resize();
       setMode("full");
-      connect();
+      bootSpectator();
       requestAnimationFrame(loop);
     </script>
   </body>

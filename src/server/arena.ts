@@ -8,7 +8,7 @@ import {
 } from "../config.js";
 import { Game, type SnakeSpec } from "../engine/game.js";
 import { Rng } from "../rng.js";
-import { BASELINE_COUNT, BASELINE_KINDS, BASELINE_ROSTER } from "../npc/baselines.js";
+import { BASELINE_COUNT, BASELINE_KINDS, BASELINE_ROSTER, baselineIntent } from "../npc/baselines.js";
 import { NPC_REGISTRY, NPC_ANCHOR, type NpcKind } from "../npc/bots.js";
 import { DIRECTIONS, DELTA, type Direction, type Cell, type Snake, cellKey } from "../types.js";
 import { analyseMove, type MoveContext, SPACE_CAP } from "../engine/decision-quality.js";
@@ -49,6 +49,16 @@ export interface AgentSession {
   /** This agent's last few {tick, move, legal} results, fed back in each state so
    * the model has short-term memory of what it did. Reset each round. */
   recentMoves?: RecentMove[];
+}
+
+/** In-process stand-in for a connected agent — baselines use the same tick
+ * window, deliberation beat, and lock-in path as WebSocket agents. */
+interface BaselineSession {
+  snakeId: string;
+  displayName: string;
+  pendingMove: Direction | null;
+  /** Declared intent for the spectator overlay (same path as WebSocket agents). */
+  lastIntent: Intent;
 }
 
 export interface ArenaHooks {
@@ -199,6 +209,10 @@ export class Arena {
   private readonly logs: LogStore | null;
 
   private readonly agents = new Map<string, AgentSession>();
+  /** Programmatic baseline competitors (Shelter / Stalker / Feast). */
+  private baselineSessions = new Map<string, BaselineSession>();
+  /** Pending setTimeouts for baseline lock-in this decision window. */
+  private baselineTimers: NodeJS.Timeout[] = [];
   private game: Game | null = null;
   private npc = new Map<string, { kind: NpcKind; rng: Rng }>();
   private round = 0;
@@ -230,6 +244,8 @@ export class Arena {
   private deliberationStartedAt = 0;
   private tickTimer: NodeJS.Timeout | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
+  /** When the next round is scheduled to begin (epoch ms). 0 = none pending. */
+  private restartAt = 0;
   /** Grace window after the first agent joins an ambient lobby, so a burst of
    * agents arriving together all start in the same round. */
   private joinTimer: NodeJS.Timeout | null = null;
@@ -266,6 +282,7 @@ export class Arena {
   }
 
   stop(): void {
+    this.clearBaselineTimers();
     if (this.tickTimer) clearTimeout(this.tickTimer);
     if (this.restartTimer) clearTimeout(this.restartTimer);
     if (this.joinTimer) clearTimeout(this.joinTimer);
@@ -287,20 +304,58 @@ export class Arena {
     });
   }
 
-  /** Latest full frame + static map, for a spectator that just connected. */
-  currentFrame():
-    | {
-        round: number;
-        world: { width: number; height: number };
-        obstacles: ReturnType<typeof staticMap>["obstacles"];
-        frame: SpectatorFrame;
-        rules: RulesPayload;
-        deliberation: ReturnType<Arena["currentDeliberation"]>;
-      }
-    | null {
-    if (!this.game) return null;
+  /** Milliseconds until the next round starts, if a restart is scheduled. */
+  private nextRoundInMs(): number | null {
+    if (this.restartAt <= Date.now()) return null;
+    return this.restartAt - Date.now();
+  }
+
+  /** Latest full frame + static map, for a spectator that just connected.
+   * Always returns a payload — `waiting`/`intermission` when between rounds or
+   * retrying a failed start, with an optional restart countdown. */
+  currentFrame(): {
+    waiting: boolean;
+    intermission: boolean;
+    round: number;
+    next_round_in_ms: number | null;
+    world: { width: number; height: number } | null;
+    obstacles: ReturnType<typeof staticMap>["obstacles"];
+    frame: SpectatorFrame | null;
+    rules: RulesPayload | null;
+    deliberation: ReturnType<Arena["currentDeliberation"]>;
+  } {
+    const nextRoundInMs = this.nextRoundInMs();
+    if (!this.game) {
+      return {
+        waiting: true,
+        intermission: true,
+        round: this.round,
+        next_round_in_ms: nextRoundInMs,
+        world: null,
+        obstacles: [],
+        frame: null,
+        rules: null,
+        deliberation: null,
+      };
+    }
+    if (!this.roundActive) {
+      return {
+        waiting: true,
+        intermission: true,
+        round: this.round,
+        next_round_in_ms: nextRoundInMs,
+        world: { width: this.game.config.width, height: this.game.config.height },
+        obstacles: staticMap(this.game).obstacles,
+        frame: this.snapshotNow(this.game),
+        rules: this.rulesPayload(),
+        deliberation: null,
+      };
+    }
     return {
+      waiting: false,
+      intermission: false,
       round: this.round,
+      next_round_in_ms: null,
       world: { width: this.game.config.width, height: this.game.config.height },
       obstacles: staticMap(this.game).obstacles,
       frame: this.snapshotNow(this.game),
@@ -323,10 +378,10 @@ export class Arena {
     const agents: Array<{ id: string; name: string }> = [];
     const locked: string[] = [];
     for (const snake of this.game.aliveSnakes()) {
-      const session = this.agents.get(snake.id);
-      if (!session) continue;
-      agents.push({ id: snake.id, name: session.displayName });
-      if (session.pendingMove) locked.push(snake.id);
+      const account = this.roundAccounts.get(snake.id);
+      if (!account) continue;
+      agents.push({ id: snake.id, name: account });
+      if (this.hasLockedMove(snake.id)) locked.push(snake.id);
     }
     if (agents.length === 0) return null;
     return {
@@ -458,8 +513,12 @@ export class Arena {
       console.error(`Round start failed (round ~${this.round + 1}); retrying shortly:`, err);
       this.roundActive = false;
       this.game = null;
+      this.restartAt = Date.now() + this.serverConfig.roundRestartDelayMs;
       if (this.restartTimer) clearTimeout(this.restartTimer);
-      this.restartTimer = setTimeout(() => this.startRound(), this.serverConfig.roundRestartDelayMs);
+      this.restartTimer = setTimeout(() => {
+        this.restartAt = 0;
+        this.startRound();
+      }, this.serverConfig.roundRestartDelayMs);
     }
   }
 
@@ -507,6 +566,7 @@ export class Arena {
     }
 
     this.npc = new Map();
+    this.baselineSessions = new Map();
     const { minSnakes, npcBackfill } = this.serverConfig;
     const agentCount = specs.length;
     this.roundHasAgents = agentCount > 0;
@@ -516,6 +576,12 @@ export class Arena {
       specs.push({ id: baseline.id, displayName: baseline.displayName, isNpc: false });
       this.roundAccounts.set(baseline.id, baseline.displayName);
       this.roundQuality.set(baseline.id, freshQualityAcc());
+      this.baselineSessions.set(baseline.id, {
+        snakeId: baseline.id,
+        displayName: baseline.displayName,
+        pendingMove: null,
+        lastIntent: baselineIntent(baseline.kind),
+      });
       this.npc.set(baseline.id, { kind: baseline.kind, rng: new Rng(`${seed}:${baseline.id}`) });
     }
 
@@ -635,6 +701,7 @@ export class Arena {
     };
 
     this.game = Game.create(specs, seed, roundConfig);
+    this.restartAt = 0;
     // Special prizes (e.g. golden apple) spawn after the board is built.
     for (const m of mods) {
       if (m.specialFood) this.game.addSpecialFood(m.specialFood.value, m.specialFood.count);
@@ -680,13 +747,67 @@ export class Arena {
       notes: [],
     });
 
-    // Open the first decision window and arm its ceiling. Subsequent windows are
-    // armed at the end of each resolveTick. `tickMs` is the *ceiling*, not a fixed
-    // wait: the window resolves as soon as every live agent has locked in.
+    // Open the first decision window and arm its ceiling.
     this.currentTickMs = tickMs;
+    this.openDecisionWindow();
+  }
+
+  /** Whether a scored participant (human or baseline) has submitted this tick. */
+  private hasLockedMove(snakeId: string): boolean {
+    return Boolean(
+      this.agents.get(snakeId)?.pendingMove ?? this.baselineSessions.get(snakeId)?.pendingMove,
+    );
+  }
+
+  /** Start a new decision window: clear moves, let baselines submit, broadcast
+   * deliberation + timer, arm the ceiling. Same path WebSocket agents use. */
+  private openDecisionWindow(): void {
+    if (!this.game) return;
+    this.clearBaselineTimers();
+    for (const session of this.agents.values()) session.pendingMove = null;
+    for (const base of this.baselineSessions.values()) base.pendingMove = null;
+
     this.sendStateToAgents();
     this.broadcastDeliberation();
+    this.scheduleBaselineSubmissions();
     this.armTick();
+    this.maybeResolveEarly();
+  }
+
+  /** Cancel any in-flight baseline lock-in timers (window closed or round ended). */
+  private clearBaselineTimers(): void {
+    for (const t of this.baselineTimers) clearTimeout(t);
+    this.baselineTimers = [];
+  }
+
+  /** Stagger baseline lock-ins across the tick ceiling so spectators see the same
+   * deliberation beat and countdown as for connected agents (not instant resolve). */
+  private scheduleBaselineSubmissions(): void {
+    if (!this.game) return;
+    const tick = this.game.tick;
+    for (const snake of this.game.aliveSnakes()) {
+      const base = this.baselineSessions.get(snake.id);
+      if (!base) continue;
+      const npc = this.npc.get(snake.id);
+      if (!npc) continue;
+      const minMs = Math.max(1, Math.floor(this.currentTickMs * 0.08));
+      const maxMs = Math.max(minMs, Math.floor(this.currentTickMs * 0.82));
+      const delay = minMs + npc.rng.int(maxMs - minMs + 1);
+      const timer = setTimeout(() => this.submitBaselineMove(snake.id, tick), delay);
+      this.baselineTimers.push(timer);
+    }
+  }
+
+  /** Baseline "submits" its move: lock-in broadcast + early resolve, same as agents. */
+  private submitBaselineMove(snakeId: string, tick: number): void {
+    if (!this.roundActive || !this.game || this.game.tick !== tick) return;
+    const base = this.baselineSessions.get(snakeId);
+    if (!base || base.pendingMove !== null) return;
+    const npc = this.npc.get(snakeId);
+    if (!npc) return;
+    base.pendingMove = NPC_REGISTRY[npc.kind]!.decide(this.game, snakeId, npc.rng);
+    this.hooks.broadcastSpectators({ type: "locked_in", id: snakeId, tick });
+    this.maybeResolveEarly();
   }
 
   /** Arm the ceiling timer for the current decision window. The window will
@@ -696,19 +817,17 @@ export class Arena {
     this.tickTimer = setTimeout(() => this.resolveTick(), this.currentTickMs);
   }
 
-  /** Tell spectators a new decision window has opened: which agent snakes are
-   * thinking and the ceiling they have to answer within. This drives the live
-   * "deliberating / locked-in" beat. Skipped for ambient (NPC-only) windows. */
+  /** Tell spectators a new decision window has opened: which competitors are
+   * thinking and the ceiling they have to answer within. */
   private broadcastDeliberation(): void {
     if (!this.game) return;
     const agents: Array<{ id: string; name: string }> = [];
     const locked: string[] = [];
     for (const snake of this.game.aliveSnakes()) {
-      const session = this.agents.get(snake.id);
-      if (session) {
-        agents.push({ id: snake.id, name: session.displayName });
-        if (session.pendingMove) locked.push(snake.id);
-      }
+      const account = this.roundAccounts.get(snake.id);
+      if (!account) continue;
+      agents.push({ id: snake.id, name: account });
+      if (this.hasLockedMove(snake.id)) locked.push(snake.id);
     }
     if (agents.length === 0) return;
     this.deliberationStartedAt = Date.now();
@@ -722,17 +841,14 @@ export class Arena {
     });
   }
 
-  /** True once every *agent-controlled* live snake has submitted a move for this
-   * tick. NPCs decide instantly at resolve so they never gate. Returns false for
-   * a pure-NPC (ambient) round, which keeps the fixed ambient cadence. */
+  /** True once every scored live snake (human or baseline) has submitted. */
   private allLiveAgentsLockedIn(): boolean {
     if (!this.game) return false;
     let live = 0;
     for (const snake of this.game.aliveSnakes()) {
-      const session = this.agents.get(snake.id);
-      if (!session) continue;
+      if (!this.roundAccounts.has(snake.id)) continue;
       live += 1;
-      if (!session.pendingMove) return false;
+      if (!this.hasLockedMove(snake.id)) return false;
     }
     return live > 0;
   }
@@ -751,6 +867,7 @@ export class Arena {
 
   private resolveTick(): void {
     if (!this.roundActive || !this.game) return;
+    this.clearBaselineTimers();
     this.deliberationStartedAt = 0;
     if (this.tickTimer) {
       clearTimeout(this.tickTimer);
@@ -761,8 +878,13 @@ export class Arena {
     const moves = new Map<string, Direction>();
     for (const snake of game.aliveSnakes()) {
       const agent = this.agents.get(snake.id);
-      if (agent) {
-        if (agent.pendingMove) moves.set(snake.id, agent.pendingMove);
+      if (agent?.pendingMove) {
+        moves.set(snake.id, agent.pendingMove);
+        continue;
+      }
+      const base = this.baselineSessions.get(snake.id);
+      if (base?.pendingMove) {
+        moves.set(snake.id, base.pendingMove);
         continue;
       }
       const npc = this.npc.get(snake.id);
@@ -833,9 +955,7 @@ export class Arena {
     }
 
     // Open the next decision window and arm its ceiling.
-    this.sendStateToAgents();
-    this.broadcastDeliberation();
-    this.armTick();
+    this.openDecisionWindow();
   }
 
   /** Manhattan distance from a cell to the nearest food, or Infinity if none. */
@@ -874,6 +994,7 @@ export class Arena {
       const snake = game.snakeById(snakeId);
       if (!snake || !snake.alive) continue;
       const session = this.agents.get(snakeId);
+      const baseline = this.baselineSessions.get(snakeId);
       const move = session?.pendingMove ?? moves.get(snakeId) ?? null;
       const ctx: MoveContext = {
         width: game.config.width,
@@ -958,7 +1079,7 @@ export class Arena {
       // Cross-check the agent's *declared* intent against the real board. We do
       // not act on the intent; this is purely a "does what it said match what it
       // did" reasoning signal, surfaced to spectators and the agent's summary.
-      const declared = session?.lastIntent ?? null;
+      const declared = session?.lastIntent ?? baseline?.lastIntent ?? null;
       let intentOk: boolean | undefined;
       if (declared) {
         switch (declared) {
@@ -1121,6 +1242,7 @@ export class Arena {
 
   private endRound(reason: string): void {
     if (!this.game) return;
+    this.clearBaselineTimers();
     this.roundActive = false;
     this.deliberationStartedAt = 0;
     if (this.tickTimer) {
@@ -1325,7 +1447,11 @@ export class Arena {
 
     this.saveReplay(standings);
 
-    this.restartTimer = setTimeout(() => this.startRound(), this.serverConfig.roundRestartDelayMs);
+    this.restartAt = Date.now() + this.serverConfig.roundRestartDelayMs;
+    this.restartTimer = setTimeout(() => {
+      this.restartAt = 0;
+      this.startRound();
+    }, this.serverConfig.roundRestartDelayMs);
   }
 
   private saveReplay(standings: unknown): void {

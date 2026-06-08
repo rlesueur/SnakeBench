@@ -82,7 +82,12 @@ function broadcastSpectators(msg: unknown): void {
   }
   const data = JSON.stringify(msg);
   for (const ws of spectators) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    if (ws.readyState !== WebSocket.OPEN) continue;
+    try {
+      ws.send(data);
+    } catch (err) {
+      console.warn("spectator broadcast failed:", (err as Error).message);
+    }
   }
 }
 
@@ -246,10 +251,16 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
-  // Public: lets the account page show a correct sign-in state rather than a
-  // button that bounces to a broken Google error when OAuth isn't configured.
+  // Public: lets pages show correct sign-in chrome and whether Google OAuth is
+  // configured (so the account page does not link to a broken sign-in flow).
   if (path === "/api/auth/status") {
-    sendJson(res, 200, { google: google.isConfigured() });
+    const uid = getSessionUserId(req);
+    let account: string | null = null;
+    if (uid) {
+      const user = await users.getUser(uid);
+      if (user) account = user.displayName;
+    }
+    sendJson(res, 200, { google: google.isConfigured(), signedIn: account != null, account });
     return;
   }
 
@@ -594,13 +605,28 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
   });
 });
 
+function sendSpectator(ws: WebSocket, msg: unknown): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify(msg));
+  } catch (err) {
+    console.warn("spectator send failed:", (err as Error).message);
+  }
+}
+
 spectatorWss.on("connection", (ws: WebSocket, ip: string) => {
   spectators.add(ws);
   spectatorsByIp.set(ip, (spectatorsByIp.get(ip) ?? 0) + 1);
-  const init = arena.currentFrame();
-  if (init) ws.send(JSON.stringify({ type: "init", ...init }));
-  ws.send(JSON.stringify({ type: "leaderboard", board: arena.leaderboard() }));
+  // Always send init so the client can leave the loading state — even when the
+  // arena is between rounds or retrying a failed start (waiting: true).
+  sendSpectator(ws, { type: "init", ...arena.currentFrame() });
+  sendSpectator(ws, { type: "leaderboard", board: arena.leaderboard() });
+  // Keep the socket alive through idle proxies (Render, CDNs).
+  const pingIv = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) ws.ping();
+  }, 25_000);
   ws.on("close", () => {
+    clearInterval(pingIv);
     spectators.delete(ws);
     const n = (spectatorsByIp.get(ip) ?? 1) - 1;
     if (n <= 0) spectatorsByIp.delete(ip);

@@ -1,4 +1,5 @@
 import type { NpcKind } from "./bots.js";
+import type { Intent } from "../server/intent.js";
 
 /** A permanent programmatic baseline — always in the lobby as a yardstick to beat. */
 export interface BaselineNpc {
@@ -46,4 +47,18 @@ export const BASELINE_IDS = new Set(BASELINE_ROSTER.map((b) => b.id));
 
 export function isBaselineId(id: string): boolean {
   return BASELINE_IDS.has(id);
+}
+
+/** Declared intent shown on the spectator overlay (same enum real agents use). */
+export function baselineIntent(kind: NpcKind): Intent {
+  switch (kind) {
+    case "survivor":
+      return "evading";
+    case "hunter":
+      return "hunting";
+    case "glutton":
+      return "feeding";
+    default:
+      return "roaming";
+  }
 }
