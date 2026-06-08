@@ -20,8 +20,8 @@ export interface DecisionLog {
   evidence: unknown;
 }
 
-/** Keep at most this many decision rows per account (retention cap). */
-const RETENTION = Number(process.env.LOG_RETENTION) || 10000;
+/** Keep at most this many decision rows per account (one row per tick played). */
+const RETENTION = Number(process.env.LOG_RETENTION) || 1000;
 
 /**
  * Per-account decision logs persisted in Postgres. Appends are fire-and-forget

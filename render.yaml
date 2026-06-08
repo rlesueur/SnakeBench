@@ -25,6 +25,9 @@ services:
         value: "100"
       - key: AGENT_MSGS_PER_MIN
         value: "120"
+      # Decision log rows kept per account (one per tick; includes vision JSON).
+      - key: LOG_RETENTION
+        value: "1000"
       # Signed-cookie session secret — generated and kept by Render (256-bit,
       # well over the 32-char minimum the server enforces in production).
       - key: SESSION_SECRET
