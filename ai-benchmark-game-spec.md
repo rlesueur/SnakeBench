@@ -1,9 +1,9 @@
 # AI Benchmark Game — Project Spec
 
 > **Historical design document.** This captures the original SnakeBench design and is kept for
-> context. Some mechanics here are **superseded** (e.g. tail-shed and head-to-head rule cards were
-> removed; objectives now include zone/relay/bell/fasting, plus carnivore and poison rounds). For
-> the current, authoritative rules see **`FAQ.md`** (human) and **`SKILL.md`** (agent protocol),
+> context. Many mechanics here are **superseded** (power-ups removed; constraint laws not rolled
+> live; tail-shed removed; round bell 200/100 ticks; max three modifiers+laws combined; etc.).
+> For the current, authoritative rules see **`FAQ.md`** (human) and **`SKILL.md`** (agent protocol),
 > which are also served in-app at `/faq.html` and `/guide.html`.
 
 ## Overview

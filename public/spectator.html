@@ -481,10 +481,11 @@
       // next frame (the reveal). Drives the thinking rings + HUD countdown.
       let think = null;  // { tick, ceiling, start, ids:Set, names:Map, locked:Set }
       let lastBellWarnKey = "";
-      // Moves are revealed crisply over REVEAL_MS, then the board HOLDS for the
-      // rest of the (variable) window while agents think — instead of smearing one
-      // cell of motion across the whole 10s. This is the pipelined reveal.
+      // Moves are revealed crisply over REVEAL_MS, then the board holds at the
+      // landed pose while agents think. Idle wiggle (see holdAnimBlend) keeps
+      // snakes and food visually alive for the rest of the variable window.
       const REVEAL_MS = 420;
+      const IDLE_RAMP_MS = 300;
       const easeOut = (t) => 1 - Math.pow(1 - t, 3);
 
       const trunc = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
@@ -600,19 +601,50 @@
         return easeOut(raw);
       }
       function interpHead(s) {
-        const t = interpT();
+        const body = interpBody(s);
+        if (body.length) return body[0];
         const c = s.body[0];
-        let px = c, py = c;
-        const ps = prev && prev.byId ? prev.byId.get(s.id) : null;
-        const p = ps && ps.body.length ? ps.body[0] : c;
-        return { x: lerp(p.x, c.x, t) + 0.5, y: lerp(p.y, c.y, t) + 0.5 };
+        return { x: c.x + 0.5, y: c.y + 0.5 };
       }
       function interpBody(s) {
         const t = interpT();
         const ps = prev && prev.byId ? prev.byId.get(s.id) : null;
-        return s.body.map((c, i) => {
+        const pts = s.body.map((c, i) => {
           const p = ps && ps.body.length ? (ps.body[i] ?? ps.body[ps.body.length - 1]) : c;
           return { x: lerp(p.x, c.x, t) + 0.5, y: lerp(p.y, c.y, t) + 0.5 };
+        });
+        return applyIdleWiggle(pts, s.id);
+      }
+
+      /** Ms since the move reveal finished (0 while still sliding into place). */
+      function holdPhaseMs() {
+        if (!cur) return 0;
+        return Math.max(0, performance.now() - cur.recvT - REVEAL_MS);
+      }
+
+      /** 0 during reveal, eases up during deliberation so snakes stay alive on screen. */
+      function holdAnimBlend() {
+        const p = holdPhaseMs();
+        if (p <= 0) return 0;
+        return Math.min(1, p / IDLE_RAMP_MS);
+      }
+
+      /** Subtle perpendicular sway on landed poses — cosmetic only, not game state. */
+      function applyIdleWiggle(worldPts, snakeId) {
+        const blend = holdAnimBlend();
+        if (blend <= 0 || !worldPts.length) return worldPts;
+        const t = performance.now() * 0.001;
+        const seed = (hashId(snakeId) % 997) * 0.01;
+        return worldPts.map((pt, i) => {
+          const back = worldPts[i + 1] ?? pt;
+          const fwd = worldPts[i - 1] ?? pt;
+          let dx = fwd.x - back.x, dy = fwd.y - back.y;
+          if (dx === 0 && dy === 0) { dx = 1; dy = 0; }
+          const m = Math.hypot(dx, dy) || 1;
+          const px = -dy / m, py = dx / m;
+          const amp = (i === 0 ? 0.1 : 0.065) * blend;
+          const wave = Math.sin(t * (2.6 + i * 0.11) + seed + i * 0.62);
+          return { x: pt.x + px * wave * amp, y: pt.y + py * wave * amp };
         });
       }
 
@@ -750,9 +782,11 @@
         if (cur) {
           // Food.
           ctx.save();
+          const ft = performance.now() * 0.001;
           for (const f of cur.food) {
             const st = foodStyle(f.value);
-            const r = Math.max(1.4, cam.scale * st.r);
+            const pulse = 1 + 0.1 * Math.sin(ft * 2.8 + f.x * 0.61 + f.y * 0.53);
+            const r = Math.max(1.4, cam.scale * st.r * pulse);
             const x = sx(f.x + 0.5), y = sy(f.y + 0.5);
             ctx.shadowColor = st.col;
             ctx.shadowBlur = r * 2;
@@ -960,7 +994,8 @@
         }
 
         const h = pts[0];
-        const hr = wBody * 0.62;
+        const breathe = 1 + 0.06 * holdAnimBlend() * Math.sin(performance.now() * 0.004 + hashId(s.id) * 0.01);
+        const hr = wBody * 0.62 * breathe;
         ctx.fillStyle = darkCol(s.id);
         ctx.beginPath(); ctx.arc(h.x, h.y, hr + Math.max(0.5, cam.scale * 0.09), 0, 7); ctx.fill();
         ctx.fillStyle = headCol(s.id);
