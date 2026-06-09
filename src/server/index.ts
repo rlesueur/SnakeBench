@@ -644,16 +644,34 @@ spectatorWss.on("connection", (ws: WebSocket, ip: string) => {
   // Lightweight ack first so the client knows the socket is live before we
   // serialise a (possibly large) board snapshot on the next tick.
   sendSpectator(ws, { type: "sync" });
-  const frame = arena.currentFrame();
-  const board = arena.leaderboard();
   setImmediate(() => {
     if (ws.readyState !== WebSocket.OPEN) return;
-    sendSpectator(ws, { type: "init", ...frame });
-    sendSpectator(ws, { type: "leaderboard", board });
+    try {
+      const frame = arena.currentFrame();
+      sendSpectator(ws, { type: "init", ...frame });
+      sendSpectator(ws, { type: "leaderboard", board: arena.leaderboard() });
+    } catch (err) {
+      console.warn("spectator init failed:", (err as Error).message);
+      sendSpectator(ws, {
+        type: "init",
+        waiting: true,
+        intermission: true,
+        round: 0,
+        next_round_in_ms: null,
+        world: null,
+        obstacles: [],
+        frame: null,
+        rules: null,
+        deliberation: null,
+      });
+    }
   });
-  // Keep the socket alive through idle proxies (Render, CDNs).
+  // Keep the socket alive through idle proxies (Render, CDNs) and give the
+  // client a visible heartbeat so it can detect a dead connection without refresh.
   const pingIv = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) ws.ping();
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.ping();
+    sendSpectator(ws, { type: "heartbeat", ts: Date.now() });
   }, 25_000);
   ws.on("close", () => {
     clearInterval(pingIv);
