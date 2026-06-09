@@ -112,13 +112,13 @@ export interface Brain {
 
 const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
-const CONNECT_DEBOUNCE_MS = 500;
-const OPEN_TIMEOUT_MS = 25_000;
-const HANDSHAKE_TIMEOUT_MS = 45_000;
-/** Absolute wall-clock cap for pre-welcome handshake (heartbeats must not extend forever). */
-const HANDSHAKE_MAX_MS = 90_000;
-const STATE_WATCH_MS = 15_000;
-const STATE_STALE_MS = 120_000;
+/** Reconnect if no message (including heartbeats) arrives for this long. The
+ * server heartbeats every 25s, so this tolerates a couple of misses. It also
+ * comfortably exceeds the per-tick think ceiling, so a slow model is never
+ * dropped mid-decision. */
+const DEAD_MS = 80_000;
+/** How often the liveness watchdog checks the last-activity clock. */
+const WATCH_INTERVAL_MS = 5_000;
 
 function arenaHttpOrigin(arenaUrl: string): string {
   const wsBase = arenaUrl.replace(/\/$/, "");
@@ -158,249 +158,82 @@ export function runAgent(brain: Brain): void {
   const key = process.argv[2] ?? process.env.AGENT_KEY ?? "local-dev-key";
   const arenaUrl = process.argv[3] ?? process.env.ARENA_URL ?? "ws://localhost:8080";
 
+  // --- connection state: deliberately minimal ------------------------------
+  // One socket, one backoff, one "last time we heard anything" clock, and one
+  // watchdog. There is NO separate handshake state machine and NO per-message
+  // gating: any inbound message keeps the connection alive, and `welcome` simply
+  // logs that the session is ready. This is the whole connection design.
+  let ws: WebSocket | null = null;
   let backoff = MIN_BACKOFF_MS;
-  let activeWs: WebSocket | null = null;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let openTimer: ReturnType<typeof setTimeout> | null = null;
-  let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
-  let handshaked = false;
-  let handshakeStartedAt = 0;
-  let lastConnectAt = 0;
   let fatalAuth = false;
-  /** True while we expect periodic `state` messages (live in a round). */
-  let expectState = false;
-  let lastStateAt = 0;
-  let stateWatchTimer: ReturnType<typeof setInterval> | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastActivity = 0;
+  let inFlight: AbortController | null = null;
+  let rules: Rules | null = null;
 
-  const clearReconnectTimer = (): void => {
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
+  const scheduleReconnect = (): void => {
+    if (fatalAuth || reconnectTimer) return;
+    const delay = backoff;
+    backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+    console.log(`Reconnecting in ${Math.round(delay / 1000)}s…`);
+    reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
+      void boot();
+    }, delay);
+  };
+
+  /** Decide and submit a move for one tick, bounded by the server's deadline. */
+  const submitMove = async (state: State): Promise<void> => {
+    if (!ws || Date.now() > state.action_deadline_ms) return;
+    inFlight?.abort();
+    const ac = new AbortController();
+    inFlight = ac;
+    const budget = Math.max(500, state.action_deadline_ms - Date.now() - 100);
+    const timer = setTimeout(() => ac.abort(), budget);
+    const started = Date.now();
+    try {
+      const decision = await brain.decide({ state, rules, signal: ac.signal });
+      clearTimeout(timer);
+      const move = decision.move;
+      if (move && ws && ws.readyState === WebSocket.OPEN) {
+        const latencyMs = Date.now() - started;
+        sendJson(ws, {
+          type: "action",
+          tick: state.tick,
+          move,
+          intent: decision.intent,
+          target: decision.target,
+          log: {
+            model: brain.name,
+            latencyMs,
+            intent: decision.intent,
+            target: decision.target,
+            ...decision.log,
+          },
+        });
+        console.log(
+          `tick ${state.tick}: ${move}/${decision.intent ?? "—"} (${latencyMs}ms, len ${state.you.length})`,
+        );
+      }
+    } catch (err) {
+      clearTimeout(timer);
+      if (!ac.signal.aborted) console.error("model error:", (err as Error).message);
     }
   };
 
-  const clearConnectTimers = (): void => {
-    if (openTimer) {
-      clearTimeout(openTimer);
-      openTimer = null;
-    }
-    if (handshakeTimer) {
-      clearTimeout(handshakeTimer);
-      handshakeTimer = null;
-    }
-  };
-
-  const detachWs = (ws: WebSocket): void => {
-    ws.removeAllListeners();
-  };
-
-  const closeActiveWs = (): void => {
-    clearConnectTimers();
-    clearStateWatch();
-    expectState = false;
-    lastStateAt = 0;
-    if (!activeWs) return;
-    const ws = activeWs;
-    activeWs = null;
-    detachWs(ws);
-    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-    }
-  };
-
-  const clearStateWatch = (): void => {
-    if (stateWatchTimer) {
-      clearInterval(stateWatchTimer);
-      stateWatchTimer = null;
-    }
-  };
-
-  const armStateWatch = (ws: WebSocket): void => {
-    clearStateWatch();
-    stateWatchTimer = setInterval(() => {
-      if (ws !== activeWs || !handshaked || !expectState) return;
-      if (!lastStateAt || Date.now() - lastStateAt <= STATE_STALE_MS) return;
-      console.warn("No state from arena — reconnecting.");
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-    }, STATE_WATCH_MS);
-  };
-
-  const scheduleReconnect = (delayMs: number): void => {
-    if (fatalAuth) return;
-    clearReconnectTimer();
-    reconnectTimer = setTimeout(() => void boot(), delayMs);
-  };
-
-  const markHandshaked = (ws: WebSocket): void => {
-    if (handshaked) return;
-    handshaked = true;
-    backoff = MIN_BACKOFF_MS;
-    if (handshakeTimer) {
-      clearTimeout(handshakeTimer);
-      handshakeTimer = null;
-    }
-    armStateWatch(ws);
-  };
-
-  const armHandshakeTimeout = (ws: WebSocket): void => {
-    if (handshakeTimer) clearTimeout(handshakeTimer);
-    handshakeTimer = setTimeout(() => {
-      if (ws !== activeWs || handshaked) return;
-      console.warn("Timed out waiting for welcome — reconnecting.");
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-    }, HANDSHAKE_TIMEOUT_MS);
-  };
-
-  const checkHandshakeWallClock = (ws: WebSocket): boolean => {
-    if (handshaked) return true;
-    if (Date.now() - handshakeStartedAt > HANDSHAKE_MAX_MS) {
-      console.warn("Handshake wall-clock limit — reconnecting.");
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-      return false;
-    }
-    return true;
-  };
-
-  const bumpHandshakeTimeout = (ws: WebSocket, extend: boolean): void => {
-    if (handshaked) return;
-    if (!checkHandshakeWallClock(ws)) return;
-    if (extend) armHandshakeTimeout(ws);
-  };
-
-  const connect = (): void => {
-    if (fatalAuth) return;
-    if (activeWs?.readyState === WebSocket.CONNECTING) return;
-    if (activeWs?.readyState === WebSocket.OPEN && (handshaked || handshakeTimer)) return;
-
-    const now = Date.now();
-    if (now - lastConnectAt < CONNECT_DEBOUNCE_MS) {
-      scheduleReconnect(CONNECT_DEBOUNCE_MS - (now - lastConnectAt));
-      return;
-    }
-    lastConnectAt = now;
-
-    closeActiveWs();
-    handshaked = false;
-    handshakeStartedAt = Date.now();
-
-    const ws = new WebSocket(`${arenaUrl}/agent`, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    activeWs = ws;
-
-    let inFlight: AbortController | null = null;
-    let rules: Rules | null = null;
-
-    openTimer = setTimeout(() => {
-      if (ws !== activeWs || ws.readyState !== WebSocket.CONNECTING) return;
-      console.warn("WebSocket open timed out — reconnecting.");
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-    }, OPEN_TIMEOUT_MS);
-
-    ws.on("open", () => {
-      if (ws !== activeWs) return;
-      if (openTimer) {
-        clearTimeout(openTimer);
-        openTimer = null;
-      }
-      armHandshakeTimeout(ws);
-      console.log(`Connected to ${arenaUrl}; waiting for welcome… (${brain.banner})`);
-    });
-
-    ws.on("unexpected-response", (_req, res) => {
-      if (res.statusCode === 401) {
-        fatalAuth = true;
-        console.error("Authentication failed (401) — check your AGENT_KEY. Not retrying.");
-        process.exit(1);
-      }
-      console.error(`Handshake rejected: HTTP ${res.statusCode}`);
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-    });
-
-    ws.on("error", (err) => console.error("WS error:", err.message));
-
-    ws.on("close", (code) => {
-      if (ws !== activeWs) return;
-      activeWs = null;
-      clearConnectTimers();
-      inFlight?.abort();
-      handshaked = false;
-      if (fatalAuth) return;
-
-      let delay = backoff;
-      if (code === 4005) {
-        delay = MIN_BACKOFF_MS;
-      } else {
-        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
-      }
-      console.log(`Disconnected (code ${code}). Reconnecting in ${Math.round(delay / 1000)}s…`);
-      scheduleReconnect(delay);
-    });
-
-    ws.on("message", async (raw) => {
-      if (ws !== activeWs) return;
-      let msg: { type?: string; [key: string]: unknown };
-      try {
-        msg = JSON.parse(raw.toString());
-      } catch {
-        return;
-      }
-
-      if (msg.type === "sync") {
-        bumpHandshakeTimeout(ws, true);
-        return;
-      }
-      if (msg.type === "heartbeat") {
-        checkHandshakeWallClock(ws);
-        return;
-      }
-
-      if (msg.type === "welcome") {
-        markHandshaked(ws);
+  /** Route one decoded message. The socket-level `message` handler has already
+   * recorded liveness, so this only reacts to the few types we act on. */
+  const handle = (msg: { type?: string; [key: string]: unknown }): void => {
+    switch (msg.type) {
+      case "welcome":
+        backoff = MIN_BACKOFF_MS;
         console.log(`Session ready (${String(msg.you_id ?? "agent")}). ${brain.banner}`);
         return;
-      }
-
-      if (msg.type === "round_start") {
-        if (!handshaked) {
-          bumpHandshakeTimeout(ws, true);
-          return;
-        }
+      case "round_start":
         if (msg.rules) rules = msg.rules as Rules;
         console.log(`Round ${msg.round} started — rules: ${rules ? rules.name : "classic"}.`);
         return;
-      }
-      if (msg.type === "queued") {
-        if (!handshaked) {
-          bumpHandshakeTimeout(ws, true);
-          return;
-        }
-        expectState = false;
-        lastStateAt = 0;
+      case "queued": {
         const pos = msg.position != null ? `#${msg.position}` : "pending";
         const total = msg.queued != null ? ` of ${msg.queued}` : "";
         console.log(
@@ -408,21 +241,10 @@ export function runAgent(brain: Brain): void {
         );
         return;
       }
-      if (msg.type === "dead") {
-        if (!handshaked) {
-          bumpHandshakeTimeout(ws, true);
-          return;
-        }
-        expectState = false;
-        lastStateAt = 0;
+      case "dead":
         console.log(`Died at tick ${msg.tick}, peak size ${msg.peak_size}.`);
         return;
-      }
-      if (msg.type === "round_end") {
-        if (!handshaked) {
-          bumpHandshakeTimeout(ws, true);
-          return;
-        }
+      case "round_end": {
         const top = (msg.standings as { display_name?: string; peak_size?: number }[] | undefined)?.[0];
         let line = `Round ${msg.round} ended. Winner: ${top?.display_name} (peak ${top?.peak_size}).`;
         const y = msg.your as
@@ -446,62 +268,83 @@ export function runAgent(brain: Brain): void {
         console.log(line);
         return;
       }
-      if (msg.type !== "state") return;
-      if (!handshaked) {
-        bumpHandshakeTimeout(ws, true);
+      case "state":
+        // The arena echoes the active rules on every state; keep ours fresh so a
+        // mid-round (re)connect still plays to the correct objective.
+        if (msg.rules) rules = msg.rules as Rules;
+        void submitMove(msg.state as State);
+        return;
+      // sync / heartbeat / leaderboard / spectator frames: liveness only.
+      default:
+        return;
+    }
+  };
+
+  const connect = (): void => {
+    if (fatalAuth) return;
+    inFlight?.abort();
+    lastActivity = Date.now();
+    const sock = new WebSocket(`${arenaUrl}/agent`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    ws = sock;
+
+    sock.on("open", () => {
+      if (sock !== ws) return;
+      lastActivity = Date.now();
+      console.log(`Connected to ${arenaUrl}; waiting for session… (${brain.banner})`);
+    });
+
+    sock.on("message", (raw) => {
+      if (sock !== ws) return;
+      lastActivity = Date.now();
+      let msg: { type?: string; [key: string]: unknown };
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
         return;
       }
+      handle(msg);
+    });
 
-      const state = msg.state as State;
-      lastStateAt = Date.now();
-      expectState = true;
-      if (Date.now() > state.action_deadline_ms) return;
-      // The arena echoes the active rules on every state too; keep ours fresh so a
-      // mid-round (re)connect still plays to the correct objective.
-      if (msg.rules) rules = msg.rules as Rules;
-
-      // Cancel any previous (now stale) request and bound this one by the deadline.
-      inFlight?.abort();
-      const ac = new AbortController();
-      inFlight = ac;
-      const budget = Math.max(500, state.action_deadline_ms - Date.now() - 100);
-      const timer = setTimeout(() => ac.abort(), budget);
-
-      const started = Date.now();
-      try {
-        const decision = await brain.decide({ state, rules, signal: ac.signal });
-        clearTimeout(timer);
-        const move = decision.move;
-        if (move && ws === activeWs && ws.readyState === WebSocket.OPEN) {
-          const latencyMs = Date.now() - started;
-          sendJson(ws, {
-            type: "action",
-            tick: state.tick,
-            move,
-            intent: decision.intent,
-            target: decision.target,
-            log: {
-              model: brain.name,
-              latencyMs,
-              intent: decision.intent,
-              target: decision.target,
-              ...decision.log,
-            },
-          });
-          console.log(
-            `tick ${state.tick}: ${move}/${decision.intent ?? "—"} (${latencyMs}ms, len ${state.you.length})`,
-          );
-        }
-      } catch (err) {
-        clearTimeout(timer);
-        if (!ac.signal.aborted) console.error("model error:", (err as Error).message);
+    sock.on("unexpected-response", (_req, res) => {
+      if (res.statusCode === 401) {
+        fatalAuth = true;
+        console.error("Authentication failed (401) — check your AGENT_KEY. Not retrying.");
+        process.exit(1);
       }
+      console.error(`Handshake rejected: HTTP ${res.statusCode}`);
+      try { sock.close(); } catch { /* ignore */ }
+    });
+
+    sock.on("error", (err) => console.error("WS error:", err.message));
+
+    sock.on("close", (code) => {
+      if (sock !== ws) return;
+      ws = null;
+      inFlight?.abort();
+      if (fatalAuth) return;
+      // 4005 = replaced by a newer connection for this account: retry promptly.
+      if (code === 4005) backoff = MIN_BACKOFF_MS;
+      console.log(`Disconnected (code ${code}).`);
+      scheduleReconnect();
     });
   };
 
+  // The one and only liveness check: if a socket exists but nothing has arrived
+  // for DEAD_MS, drop it and let `close` schedule a reconnect.
+  const watchdog = setInterval(() => {
+    if (!ws || fatalAuth) return;
+    if (Date.now() - lastActivity > DEAD_MS) {
+      console.warn("No messages from arena — reconnecting.");
+      try { ws.close(); } catch { /* ignore */ }
+    }
+  }, WATCH_INTERVAL_MS);
+  if (typeof watchdog.unref === "function") watchdog.unref();
+
   const boot = async (): Promise<void> => {
-    reconnectTimer = null;
     await wakeArena(arenaUrl);
+    if (fatalAuth) return;
     connect();
   };
 

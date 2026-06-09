@@ -1529,25 +1529,18 @@
       let connAttempts = 0;
       let activeWs = null;
       let reconnectTimer = null;
-      let initTimer = null;
-      let openTimer = null;
       let synced = false;
       let everSynced = false;
-      const INIT_TIMEOUT_MS = 45_000;
-      const OPEN_TIMEOUT_MS = 25_000;
-      const RETRY_BASE_MS = 1000;
-      const RETRY_MAX_MS = 30_000;
-      let lastConnectAt = 0;
-      let lastWsMsgAt = 0;
-      let lastFrameAt = 0;
-      let initStartedAt = 0;
       let awaitingRound = true;
       let reconnectPending = false;
-      const HEARTBEAT_STALE_MS = 75_000;
-      const FRAME_STALE_MS = 120_000;
-      const INIT_MAX_MS = 90_000;
-      const PROBE_INTERVAL_MS = 12_000;
-      const CONNECT_DEBOUNCE_MS = 500;
+      let lastActivity = 0;
+      const RETRY_BASE_MS = 1000;
+      const RETRY_MAX_MS = 30_000;
+      // The whole liveness design: reconnect if nothing (including the server's
+      // 25s heartbeats) arrives for DEAD_MS. One timer replaces the old
+      // open/init/frame/heartbeat timers that used to disagree with each other.
+      const DEAD_MS = 80_000;
+      const WATCH_INTERVAL_MS = 5_000;
 
       function retryDelayMs() {
         return Math.min(RETRY_MAX_MS, Math.round(RETRY_BASE_MS * Math.pow(1.6, Math.min(connAttempts - 1, 8))));
@@ -1557,30 +1550,26 @@
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       }
 
-      function clearInitTimer() {
-        if (initTimer) { clearTimeout(initTimer); initTimer = null; }
-      }
-
-      function clearOpenTimer() {
-        if (openTimer) { clearTimeout(openTimer); openTimer = null; }
-      }
-
       function markSynced() {
         if (synced) return;
         synced = true;
         everSynced = true;
         connAttempts = 0;
-        initStartedAt = 0;
-        clearInitTimer();
-        touchWs();
+        lastActivity = Date.now();
       }
 
-      function touchWs() {
-        lastWsMsgAt = Date.now();
+      function detachWs(ws) {
+        ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
       }
 
-      function touchFrame() {
-        lastFrameAt = Date.now();
+      function closeActiveWs() {
+        if (!activeWs) return;
+        const ws = activeWs;
+        activeWs = null;
+        detachWs(ws);
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          try { ws.close(); } catch { /* ignore */ }
+        }
       }
 
       function forceReconnect(title, detail) {
@@ -1592,13 +1581,12 @@
         scheduleReconnect(RETRY_BASE_MS);
       }
 
-      async function reconnectSpectator(delayMs = 0) {
+      async function reconnectSpectator() {
         if (reconnectPending) return;
+        if (activeWs && (activeWs.readyState === WebSocket.OPEN || activeWs.readyState === WebSocket.CONNECTING)) return;
         reconnectPending = true;
         clearReconnectTimer();
         try {
-          if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
-          if (activeWs?.readyState === WebSocket.OPEN && synced) return;
           await wakeServer();
           connect();
         } finally {
@@ -1608,68 +1596,13 @@
 
       function scheduleReconnect(ms) {
         clearReconnectTimer();
-        reconnectTimer = setTimeout(() => void reconnectSpectator(0), ms);
+        reconnectTimer = setTimeout(() => { reconnectTimer = null; void reconnectSpectator(); }, ms ?? retryDelayMs());
       }
 
       function ensureConnected() {
         if (!navigator.onLine) return;
-        const ws = activeWs;
-        if (ws?.readyState === WebSocket.OPEN && synced) return;
-        if (ws?.readyState === WebSocket.CONNECTING) {
-          if (Date.now() - lastConnectAt < OPEN_TIMEOUT_MS) return;
-          forceReconnect("Connection stuck", "Opening the live feed is taking too long. Retrying…");
-          return;
-        }
-        if (ws?.readyState === WebSocket.OPEN && !synced) {
-          if (initTimer || Date.now() - lastConnectAt < INIT_TIMEOUT_MS) return;
-          forceReconnect("Handshake stalled", "Connected but no game state arrived. Retrying…");
-          return;
-        }
-        void reconnectSpectator(300);
-      }
-
-      /** Extend the init deadline while the server is still catching us up. */
-      function bumpInitTimeout() {
-        const ws = activeWs;
-        if (!ws || synced || ws.readyState !== WebSocket.OPEN) return;
-        if (initStartedAt && Date.now() - initStartedAt > INIT_MAX_MS) {
-          forceReconnect("Handshake timed out", "The server never sent a full game state. Retrying…");
-          return;
-        }
-        armInitTimeout(ws);
-      }
-
-      /** Start the init deadline only once the WebSocket is actually open. */
-      function armInitTimeout(ws) {
-        clearInitTimer();
-        initTimer = setTimeout(() => {
-          if (ws !== activeWs || synced) return;
-          detachWs(ws);
-          if (activeWs === ws) activeWs = null;
-          try { ws.close(); } catch { /* ignore */ }
-          setConnState(
-            "disconnected",
-            "Timed out waiting for the server",
-            "No game state arrived. Retrying…",
-          );
-          scheduleReconnect(retryDelayMs());
-        }, INIT_TIMEOUT_MS);
-      }
-
-      function detachWs(ws) {
-        ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
-      }
-
-      function closeActiveWs() {
-        clearInitTimer();
-        clearOpenTimer();
-        if (!activeWs) return;
-        const ws = activeWs;
-        activeWs = null;
-        detachWs(ws);
-        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-          try { ws.close(); } catch { /* ignore */ }
-        }
+        if (activeWs && (activeWs.readyState === WebSocket.OPEN || activeWs.readyState === WebSocket.CONNECTING)) return;
+        void reconnectSpectator();
       }
 
       function setConnChip(kind, text) {
@@ -1744,7 +1677,6 @@
         if (msg.world) setWorld(msg.world);
         if (msg.frame) {
           ingestFrame(msg.frame);
-          touchFrame();
           els.tick.textContent = msg.frame.tick;
           updateBellChip(msg.frame.tick);
         }
@@ -1754,25 +1686,17 @@
       }
 
       function handleSpectatorMsg(msg) {
-        touchWs();
-        if (msg.type === "heartbeat") {
-          if (!synced && initStartedAt && Date.now() - initStartedAt > INIT_MAX_MS) {
-            forceReconnect("Handshake timed out", "Connected but no game state arrived. Retrying…");
-          }
-          return;
-        }
-        // Only `init` completes the handshake — other messages may arrive while
-        // a large board snapshot is still serialising; extend the deadline but
-        // do not hide the overlay until we have a full catch-up payload.
+        // Liveness is recorded by the socket `onmessage` handler. `sync` is just a
+        // "snapshot incoming" ack; `init` (or a round_start/frame) is what makes
+        // the board appear.
+        if (msg.type === "heartbeat") return;
         if (!synced && msg.type === "sync") {
-          bumpInitTimeout();
           els.connTitle.textContent = everSynced
             ? "Reconnecting — loading game…"
             : "Connected — loading game…";
           els.connDetail.textContent = "Receiving the current board…";
           setConnChip("wait", "Loading…");
-        } else if (!synced && msg.type !== "init") {
-          bumpInitTimeout();
+          return;
         }
         if (msg.type === "init") {
           applyInit(msg);
@@ -1809,16 +1733,12 @@
           }
         } else if (msg.type === "frame") {
           awaitingRound = false;
-          if (!synced) {
-            bumpInitTimeout();
-            return;
-          }
+          if (!synced) return;
           hideIntermission();
           clearCountdown();
           setConnState("live");
           think = null;
           ingestFrame(msg.frame, msg.notes);
-          touchFrame();
           ingestEvents(msg.events);
           casterFromNotes(cur.notes);
           els.tick.textContent = msg.frame.tick;
@@ -1880,23 +1800,11 @@
 
       function connect() {
         clearReconnectTimer();
-        const wsState = activeWs?.readyState;
-        if (wsState === WebSocket.CONNECTING) {
-          if (Date.now() - lastConnectAt < OPEN_TIMEOUT_MS) return;
-          closeActiveWs();
-        } else if (wsState === WebSocket.OPEN && (synced || initTimer)) {
-          return;
-        }
-        const now = Date.now();
-        if (now - lastConnectAt < CONNECT_DEBOUNCE_MS) {
-          scheduleReconnect(CONNECT_DEBOUNCE_MS - (now - lastConnectAt));
-          return;
-        }
-        lastConnectAt = now;
+        if (activeWs && (activeWs.readyState === WebSocket.OPEN || activeWs.readyState === WebSocket.CONNECTING)) return;
         closeActiveWs();
         synced = false;
         connAttempts += 1;
-        const delay = retryDelayMs();
+        lastActivity = Date.now();
         setConnState(
           "connecting",
           connAttempts > 1 ? "Reconnecting to live arena…" : "Connecting to live arena…",
@@ -1908,25 +1816,9 @@
         const ws = new WebSocket(`${proto}://${location.host}/spectate`);
         activeWs = ws;
 
-        openTimer = setTimeout(() => {
-          if (ws !== activeWs || ws.readyState !== WebSocket.CONNECTING) return;
-          detachWs(ws);
-          if (activeWs === ws) activeWs = null;
-          try { ws.close(); } catch { /* ignore */ }
-          setConnState(
-            "disconnected",
-            "Connection timed out",
-            "Could not open the live feed. Retrying…",
-          );
-          scheduleReconnect(delay);
-        }, OPEN_TIMEOUT_MS);
-
         ws.onopen = () => {
-          if (ws !== activeWs || synced) return;
-          clearOpenTimer();
-          initStartedAt = Date.now();
-          touchWs();
-          armInitTimeout(ws);
+          if (ws !== activeWs) return;
+          lastActivity = Date.now();
           els.connTitle.textContent = everSynced
             ? "Reconnecting — loading game…"
             : "Connected — loading game…";
@@ -1939,6 +1831,7 @@
         };
         ws.onmessage = (ev) => {
           if (ws !== activeWs) return;
+          lastActivity = Date.now();
           try {
             handleSpectatorMsg(JSON.parse(ev.data));
           } catch { /* malformed frame — ignore */ }
@@ -1946,24 +1839,16 @@
         ws.onclose = () => {
           if (ws !== activeWs) return;
           activeWs = null;
-          clearInitTimer();
-          clearOpenTimer();
           synced = false;
-          if (everSynced) {
-            setConnState(
-              "disconnected",
-              "Connection lost",
-              "Retrying automatically…",
-            );
-            scheduleReconnect(RETRY_BASE_MS);
-          } else {
-            setConnState(
-              "disconnected",
-              "Waiting for the arena…",
-              "Will connect automatically when the server is back online.",
-            );
-            scheduleReconnect(delay);
-          }
+          live = false;
+          setConnState(
+            "disconnected",
+            everSynced ? "Connection lost" : "Waiting for the arena…",
+            everSynced
+              ? "Retrying automatically…"
+              : "Will connect automatically when the server is back online.",
+          );
+          scheduleReconnect(retryDelayMs());
         };
       }
 
@@ -1974,31 +1859,21 @@
 
       window.addEventListener("online", () => ensureConnected());
 
+      // Single liveness watchdog (mirrors the agent client): if a socket exists
+      // but nothing — not even a heartbeat — has arrived for DEAD_MS, drop it and
+      // reconnect. If there is no socket at all, make sure one is opening.
       setInterval(() => {
         if (!navigator.onLine) return;
         const ws = activeWs;
-        if (ws?.readyState === WebSocket.OPEN && synced) {
-          if (
-            lastFrameAt &&
-            !awaitingRound &&
-            !intermissionActive &&
-            Date.now() - lastFrameAt > FRAME_STALE_MS
-          ) {
-            forceReconnect("Game stalled", "No board updates from the server. Reconnecting…");
-            return;
-          }
-          if (lastWsMsgAt && Date.now() - lastWsMsgAt > HEARTBEAT_STALE_MS) {
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+          if (Date.now() - lastActivity > DEAD_MS) {
             forceReconnect("Live feed stalled", "No data from the server. Reconnecting…");
           }
           return;
         }
         if (reconnectPending || reconnectTimer) return;
-        if (!ws || ws.readyState === WebSocket.CLOSED) {
-          void reconnectSpectator(0);
-          return;
-        }
         ensureConnected();
-      }, PROBE_INTERVAL_MS);
+      }, WATCH_INTERVAL_MS);
 
       async function wakeServer() {
         for (let i = 0; i < 6; i++) {
@@ -2021,7 +1896,7 @@
           "Connecting to the arena…",
           "Will keep trying automatically until the server is available.",
         );
-        void reconnectSpectator(0);
+        void reconnectSpectator();
       }
 
       async function loadAccountChip() {

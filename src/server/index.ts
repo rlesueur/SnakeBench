@@ -568,29 +568,24 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
   };
 
   // Handshake order is fixed: sync → welcome → catch-up (state|queued|dead).
-  // Registration waits until welcome so tick traffic cannot arrive first.
   sendAgent(ws, { type: "sync" });
-  setImmediate(() => {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    if (agentWsByAccount.get(accountKey) !== ws) return;
-    try {
-      session.send({
-        type: "welcome",
-        you_id: snakeId,
-        config,
-        docs: { skill: "/api/skill", guide: "/api/guide", human: "/guide.html" },
-      });
-      arena.addAgent(session);
-      arena.catchUpAgent(session);
-      arena.ensureTickLoop();
-    } catch (err) {
-      console.error(`Agent handshake failed for ${displayName}:`, err);
-      if (agentWsByAccount.get(accountKey) === ws) {
-        arena.removeAgent(snakeId);
-        try { ws.close(1011, "handshake failed"); } catch { /* ignore */ }
-      }
+  try {
+    session.send({
+      type: "welcome",
+      you_id: snakeId,
+      config,
+      docs: { skill: "/api/skill", guide: "/api/guide", human: "/guide.html" },
+    });
+    arena.addAgent(session);
+    arena.catchUpAgent(session);
+    arena.ensureTickLoop();
+  } catch (err) {
+    console.error(`Agent handshake failed for ${displayName}:`, err);
+    if (agentWsByAccount.get(accountKey) === ws) {
+      arena.removeAgent(snakeId);
+      try { ws.close(1011, "handshake failed"); } catch { /* ignore */ }
     }
-  });
+  }
   console.log(`Agent connected: ${displayName} (${snakeId})`);
 
   const pingIv = setInterval(() => {
