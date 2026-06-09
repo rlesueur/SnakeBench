@@ -14,7 +14,7 @@ import { DIRECTIONS, DELTA, type Direction, type Cell, type Snake, cellKey } fro
 import { analyseMove, type MoveContext, SPACE_CAP } from "../engine/decision-quality.js";
 import { expandStandings, DEFAULT_RATING, DEFAULT_RD } from "../rating/glicko2.js";
 import { buildAgentView, type RecentMove } from "./view.js";
-import { pickRuleCard, rollModifiers, rollLaws, foodMultiplier, type RuleCard, type Modifier } from "../rules/cards.js";
+import { pickRuleCard, rollRoundExtras, foodMultiplier, type RuleCard, type Modifier } from "../rules/cards.js";
 import { type Law, applyTransform } from "../engine/laws.js";
 import { parseIntent, sanitiseTarget, type Intent } from "./intent.js";
 import { fullSnapshot, staticMap, type SpectatorFrame } from "./snapshot.js";
@@ -628,8 +628,6 @@ export class Arena {
     // mechanical effects: head-to-head rule and food availability.
     const card = pickRuleCard(seed);
     this.roundCard = card;
-    const mods = rollModifiers(seed);
-    this.roundMods = mods;
 
     // Size the play-area to the number of snakes in this round. Combat cards pack
     // the board tighter (boardScale < 1) to force the encounters that make kills
@@ -640,6 +638,12 @@ export class Arena {
     const minSide = Math.max(50, Math.ceil(Math.sqrt(specs.length * (startingLength + 8) * 4)));
     const width = Math.max(minSide, Math.round(dims.width * scale));
     const height = Math.max(minSide, Math.round(dims.height * scale));
+
+    // Roll modifiers and laws (capped at three combined extras on the base card).
+    const { modifiers: mods, laws } = rollRoundExtras(seed, width, height);
+    this.roundMods = mods;
+    this.roundLaws = laws;
+
     // Vision scales with the board so rivals are actually visible to hunt — a fixed
     // radius on a large board left snakes blind to each other. Clamped so it stays
     // a partial-observability task on big boards and the payload stays sane.
@@ -695,11 +699,6 @@ export class Arena {
       bellTick = Math.min(maxTicks, 120 + orng.int(120));
     }
     const effectiveMaxTicks = bellTick ?? maxTicks;
-
-    // Roll the round's "laws" (dynamics-changing rules). Spatial parameters are
-    // sized to the final board, so they vary every round and can't be hard-coded.
-    const laws = rollLaws(seed, width, height);
-    this.roundLaws = laws;
 
     const roundConfig = {
       ...this.config,

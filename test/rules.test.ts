@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RULE_CARDS, MODIFIERS, pickRuleCard, rollModifiers, foodMultiplier } from "../src/rules/cards.js";
+import { RULE_CARDS, MODIFIERS, pickRuleCard, rollModifiers, rollLaws, rollRoundExtras, capRoundExtras, MAX_ROUND_EXTRAS, foodMultiplier } from "../src/rules/cards.js";
 
 describe("rule cards", () => {
   it("every card is well-formed", () => {
@@ -74,5 +74,18 @@ describe("rule-card modifiers", () => {
       seen.add(rollModifiers(`v${i}`).map((m) => m.id).sort().join(","));
     }
     expect(seen.size).toBeGreaterThan(5);
+  });
+
+  it("caps modifiers and laws at MAX_ROUND_EXTRAS combined", () => {
+    expect(MAX_ROUND_EXTRAS).toBe(3);
+    for (let i = 0; i < 500; i++) {
+      const { modifiers, laws } = rollRoundExtras(`cap-${i}`, 80, 80);
+      expect(modifiers.length + laws.length).toBeLessThanOrEqual(3);
+    }
+    const trimmed = capRoundExtras(
+      rollModifiers("heavy-mods"),
+      rollLaws("heavy-laws", 80, 80),
+    );
+    expect(trimmed.modifiers.length + trimmed.laws.length).toBeLessThanOrEqual(3);
   });
 });

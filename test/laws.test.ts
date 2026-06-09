@@ -235,4 +235,13 @@ describe("rollLaws", () => {
       expect(cats.size).toBe(laws.length); // no two laws share a category
     }
   });
+
+  it("never rolls cadence (tidal pull) or confine", () => {
+    for (let i = 0; i < 500; i++) {
+      for (const law of rollLaws(`no-tide-${i}`, 80, 80)) {
+        expect(law.kind).not.toBe("cadence");
+        expect(law.kind).not.toBe("confine");
+      }
+    }
+  });
 });

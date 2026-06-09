@@ -125,13 +125,15 @@ export const RULE_CARDS: readonly RuleCard[] = [
   },
 ];
 
+/** Max modifiers + laws stacked on the base rule card in one round. */
+export const MAX_ROUND_EXTRAS = 3;
+
 /**
- * Modifiers: orthogonal twists layered ON TOP of a base rule card, drawn 0–2 per
- * round (seeded). Where a card sets the *objective and collision rule*, modifiers
- * reshape the *economy and the value of hunting* — food, carcass richness, famine,
- * bounties and special prizes. Stacking a couple of these on a base card yields a
- * large space of distinct situations, so a single hard-coded strategy can't be
- * optimal: an agent has to read the brief and adapt.
+ * Modifiers: orthogonal twists layered ON TOP of a base rule card (seeded). Where a
+ * card sets the *objective and collision rule*, modifiers reshape the *economy and
+ * the value of hunting* — food, carcass richness, famine, bounties and special
+ * prizes. Stacking these on a base card yields distinct situations, so a single
+ * hard-coded strategy can't be optimal: an agent has to read the brief and adapt.
  *
  * Every field is an absolute override (or flag) the arena applies when building
  * the round config; `brief` is appended to the announced rules so agents and
@@ -159,11 +161,12 @@ export interface Modifier {
 }
 
 /**
- * Modifiers are orthogonal twists drawn 0–2 per round. We deliberately keep ONLY
+ * Modifiers are orthogonal twists drawn per round. We deliberately keep ONLY
  * twists that change how the round is *played* — cosmetic re-skins (walls on/off,
  * board size, vision) were dropped because a flood-fill bot plays them identically.
  * Each of these alters the food economy, the value of hunting, or adds a contested
  * prize, so it interacts with the card's objective rather than just redecorating.
+ * Together with laws, at most {@link MAX_ROUND_EXTRAS} extras are active per round.
  */
 export const MODIFIERS: readonly Modifier[] = [
   {
@@ -210,6 +213,32 @@ export function rollModifiers(seed: string): Modifier[] {
     chosen.push(mod);
   }
   return chosen;
+}
+
+/** Trim modifiers and laws so their combined count never exceeds {@link MAX_ROUND_EXTRAS}.
+ * Modifiers are dropped first; at least one law is kept when any law was rolled. */
+export function capRoundExtras(modifiers: Modifier[], laws: Law[]): { modifiers: Modifier[]; laws: Law[] } {
+  let mods = [...modifiers];
+  let ls = [...laws];
+  while (mods.length + ls.length > MAX_ROUND_EXTRAS) {
+    if (mods.length > 0) {
+      mods.pop();
+    } else if (ls.length > 1) {
+      ls.pop();
+    } else {
+      break;
+    }
+  }
+  return { modifiers: mods, laws: ls };
+}
+
+/** Roll modifiers and laws for a round, capped at {@link MAX_ROUND_EXTRAS} combined. */
+export function rollRoundExtras(
+  seed: string,
+  width: number,
+  height: number,
+): { modifiers: Modifier[]; laws: Law[] } {
+  return capRoundExtras(rollModifiers(seed), rollLaws(seed, width, height));
 }
 
 /** Food-target multiplier for a card's food modifier. */
@@ -273,24 +302,16 @@ export function rollLaws(seed: string, width: number, height: number): Law[] {
 }
 
 /** Build one seeded law for a category, sizing any spatial parameters to the board. */
-function makeLaw(category: LawCategory, rng: Rng, width: number, height: number): Law {
-  const margin = 5;
+function makeLaw(category: LawCategory, rng: Rng, _width: number, _height: number): Law {
   if (category === "transform") {
     return rng.next() < 0.6
       ? LAW_BUILDERS.rotate(rng.pick([1, 2, 3] as const)!)
       : LAW_BUILDERS.mirror(rng.pick(["horizontal", "vertical"] as const)!);
   }
   if (category === "constraint") {
-    // no_turn and cadence only — both are spawn-safe (they never kill on the
-    // first tick regardless of where a snake starts).
-    if (rng.next() < 0.5) {
-      return LAW_BUILDERS.noTurn(rng.pick(["left", "right"] as const)!);
-    }
-    const anchor = {
-      x: margin + rng.int(Math.max(1, width - 2 * margin)),
-      y: margin + rng.int(Math.max(1, height - 2 * margin)),
-    };
-    return LAW_BUILDERS.cadence(rng.pick([3, 4, 5] as const)!, anchor);
+    // no_turn only — cadence (tidal pull) and confine can wipe many snakes on the
+    // same tick when the constraint fires, ending rounds instantly.
+    return LAW_BUILDERS.noTurn(rng.pick(["left", "right"] as const)!);
   }
   return LAW_BUILDERS.inversion(6);
 }
