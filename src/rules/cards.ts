@@ -49,7 +49,15 @@ export interface RuleCard {
   boardScale?: number;
   /** Food at/above this value is POISON (lethal). Only small pellets are safe. */
   poisonValue?: number;
+  /** Override the round bell (turn cap). Omit for the default {@link DEFAULT_BELL_TICKS}. */
+  bellTicks?: number;
 }
+
+/** Default turn cap for every round (the bell). */
+export const DEFAULT_BELL_TICKS = 200;
+
+/** Shorter bell used by fast-paced rule cards / modifiers. */
+export const SHORT_BELL_TICKS = 100;
 
 /**
  * The catalogue. Each card picks an objective and food economy (plus the odd
@@ -88,6 +96,7 @@ export const RULE_CARDS: readonly RuleCard[] = [
     carcassFoodValue: 4,
     startingLength: 8,
     boardScale: 0.7,
+    bellTicks: SHORT_BELL_TICKS,
   },
   {
     id: "carrion",
@@ -100,6 +109,7 @@ export const RULE_CARDS: readonly RuleCard[] = [
     cutoffAbsorbFraction: 0.4,
     startingLength: 9,
     boardScale: 0.8,
+    bellTicks: SHORT_BELL_TICKS,
   },
   {
     id: "fasting",
@@ -156,6 +166,8 @@ export interface Modifier {
   carcassFoodValue?: number;
   /** Food at/above this value becomes lethal poison. */
   poisonValue?: number;
+  /** Shorten the round bell to this tick cap when stacked. */
+  bellTicks?: number;
   /** Modifier ids this one cannot co-occur with. */
   conflicts?: readonly string[];
 }
@@ -195,11 +207,14 @@ export const MODIFIERS: readonly Modifier[] = [
   },
 ];
 
-/** Deterministically roll 0–2 non-conflicting modifiers for a round. */
-export function rollModifiers(seed: string): Modifier[] {
+/** Deterministically roll 0–2 non-conflicting modifiers for a round. When a
+ * {@link RuleCard} is supplied, modifiers that duplicate the card's baked-in
+ * effects (e.g. poison on Forbidden Orchard) are skipped. */
+export function rollModifiers(seed: string, card?: RuleCard, maxCount = 2): Modifier[] {
   const rng = new Rng(`mods:${seed}`);
   // Bias toward variety while keeping plenty of "base card only" rounds.
-  const count = rng.pick([0, 0, 0, 1, 1, 1, 1, 2, 2, 2]) ?? 0;
+  const desired = rng.pick([0, 0, 0, 1, 1, 1, 1, 2, 2, 2]) ?? 0;
+  const count = Math.min(desired, maxCount);
   if (count <= 0) return [];
   const pool = [...MODIFIERS];
   const chosen: Modifier[] = [];
@@ -207,6 +222,10 @@ export function rollModifiers(seed: string): Modifier[] {
     const i = rng.int(pool.length);
     const mod = pool[i]!;
     pool.splice(i, 1);
+    if (card?.poisonValue != null && mod.poisonValue != null) continue;
+    if (card?.cutoffAbsorbFraction != null && mod.cutoffAbsorbFraction != null) continue;
+    if (card?.lengthTaxTicks != null && mod.lengthTaxTicks != null) continue;
+    if (card?.carcassFoodValue != null && mod.carcassFoodValue != null) continue;
     if (chosen.some((c) => c.conflicts?.includes(mod.id) || mod.conflicts?.includes(c.id))) {
       continue;
     }
@@ -216,29 +235,48 @@ export function rollModifiers(seed: string): Modifier[] {
 }
 
 /** Trim modifiers and laws so their combined count never exceeds {@link MAX_ROUND_EXTRAS}.
- * Modifiers are dropped first; at least one law is kept when any law was rolled. */
+ * Modifiers are dropped before laws. */
 export function capRoundExtras(modifiers: Modifier[], laws: Law[]): { modifiers: Modifier[]; laws: Law[] } {
   let mods = [...modifiers];
   let ls = [...laws];
   while (mods.length + ls.length > MAX_ROUND_EXTRAS) {
-    if (mods.length > 0) {
-      mods.pop();
-    } else if (ls.length > 1) {
-      ls.pop();
-    } else {
-      break;
-    }
+    if (mods.length > 0) mods.pop();
+    else if (ls.length > 0) ls.pop();
+    else break;
   }
   return { modifiers: mods, laws: ls };
 }
 
-/** Roll modifiers and laws for a round, capped at {@link MAX_ROUND_EXTRAS} combined. */
+/** Resolve the round bell from the card and any stacked modifiers. */
+export function resolveBellTick(
+  card: RuleCard,
+  modifiers: readonly Modifier[],
+  maxTicks: number,
+): number {
+  let ticks = card.bellTicks ?? DEFAULT_BELL_TICKS;
+  if (card.objective === "bell" && card.bellTicks == null) ticks = SHORT_BELL_TICKS;
+  for (const m of modifiers) {
+    if (m.bellTicks != null) ticks = Math.min(ticks, m.bellTicks);
+  }
+  return Math.min(maxTicks, ticks);
+}
+
+/** Roll modifiers and laws for a round, capped at {@link MAX_ROUND_EXTRAS} combined.
+ * Modifiers are rolled first; laws fill the remaining budget (always at least one
+ * law when budget allows — the benchmark's dynamics-changer). */
 export function rollRoundExtras(
   seed: string,
   width: number,
   height: number,
+  card?: RuleCard,
 ): { modifiers: Modifier[]; laws: Law[] } {
-  return capRoundExtras(rollModifiers(seed), rollLaws(seed, width, height));
+  const mods = rollModifiers(seed, card, MAX_ROUND_EXTRAS - 1);
+  const lawBudget = Math.max(1, Math.min(2, MAX_ROUND_EXTRAS - mods.length));
+  const capped = capRoundExtras(mods, rollLaws(seed, width, height, lawBudget));
+  if (capped.modifiers.length + capped.laws.length > MAX_ROUND_EXTRAS) {
+    throw new Error(`rollRoundExtras exceeded MAX_ROUND_EXTRAS (${MAX_ROUND_EXTRAS})`);
+  }
+  return capped;
 }
 
 /** Food-target multiplier for a card's food modifier. */
@@ -280,10 +318,11 @@ export function pickRuleCard(seed: string): RuleCard {
  * program, with no special-casing, must play it *wrongly*. If the only way to
  * play it well is to read the prose and reason, it belongs here.
  */
-export function rollLaws(seed: string, width: number, height: number): Law[] {
+export function rollLaws(seed: string, width: number, height: number, maxCount = 2): Law[] {
   const rng = new Rng(`laws:${seed}`);
   // At least one law every round (never plain physics); usually one, sometimes two.
-  const count = rng.pick([1, 1, 1, 2, 2]) ?? 1;
+  const desired = rng.pick([1, 1, 1, 2, 2]) ?? 1;
+  const count = Math.min(desired, maxCount);
   if (count <= 0) return [];
   // Constraint laws (no_turn, cadence, confine) are excluded — a single wrong turn
   // or synchronized tick can wipe most of the field and end the round instantly.

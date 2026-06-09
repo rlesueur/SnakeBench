@@ -53,7 +53,7 @@ describe("arena round lifecycle", () => {
 
     const end = a.inbox.find((m) => m.type === "round_end");
     expect(end).toBeTruthy();
-    expect(end.reason).toBe("time_limit");
+    expect(end.reason).toBe("bell");
     expect(Array.isArray(end.standings)).toBe(true);
     expect(end.standings.length).toBe(5); // 2 agents + 3 fixed baselines
 

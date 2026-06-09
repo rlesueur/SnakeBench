@@ -1,4 +1,5 @@
 import type { Game } from "../engine/game.js";
+import { invertTransform, lethalFoodValue } from "../engine/laws.js";
 import type { Rng } from "../rng.js";
 import {
   type Cell,
@@ -50,6 +51,16 @@ function hazardCells(game: Game): Set<string> {
   return hazards;
 }
 
+/** Whether eating food of this value would kill the snake this round. */
+export function isLethalFoodValue(game: Game, value: number): boolean {
+  if (value <= 0) return false;
+  const poison = game.config.poisonValue;
+  if (poison != null && value >= poison) return true;
+  const inversion = lethalFoodValue(game.config.laws ?? []);
+  if (inversion != null && value >= inversion) return true;
+  return false;
+}
+
 export function safeDirections(game: Game, snake: Snake): Direction[] {
   const hazards = hazardCells(game);
   return legalDirections(snake).filter((d) => {
@@ -57,8 +68,23 @@ export function safeDirections(game: Game, snake: Snake): Direction[] {
     if (h.x < 0 || h.x >= game.config.width || h.y < 0 || h.y >= game.config.height) {
       return false;
     }
-    return !hazards.has(cellKey(h));
+    if (hazards.has(cellKey(h))) return false;
+    const food = game.food.get(cellKey(h)) ?? 0;
+    return !isLethalFoodValue(game, food);
   });
+}
+
+/** Pick the move a bot wants on screen, then map it to the direction to submit
+ * when transform laws remap controls. */
+export function npcSubmittedMove(
+  game: Game,
+  selfId: string,
+  decide: Npc["decide"],
+  rng: Rng,
+  laws: readonly Law[],
+): Direction {
+  const intended = decide(game, selfId, rng);
+  return laws.length ? invertTransform(intended, laws) : intended;
 }
 
 export function manhattan(a: Cell, b: Cell): number {
@@ -68,7 +94,8 @@ export function manhattan(a: Cell, b: Cell): number {
 export function nearestFood(game: Game, from: Cell): Cell | undefined {
   let best: Cell | undefined;
   let bestDist = Infinity;
-  for (const k of game.food.keys()) {
+  for (const [k, value] of game.food) {
+    if (isLethalFoodValue(game, value)) continue;
     const [x, y] = k.split(",").map(Number) as [number, number];
     const c = { x, y };
     const d = manhattan(from, c);
@@ -85,6 +112,7 @@ export function bestValueFood(game: Game, from: Cell): Cell | undefined {
   let best: Cell | undefined;
   let bestScore = -Infinity;
   for (const [k, value] of game.food) {
+    if (isLethalFoodValue(game, value)) continue;
     const [x, y] = k.split(",").map(Number) as [number, number];
     const c = { x, y };
     const score = value / (1 + manhattan(from, c));

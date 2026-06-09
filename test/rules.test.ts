@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RULE_CARDS, MODIFIERS, pickRuleCard, rollModifiers, rollLaws, rollRoundExtras, capRoundExtras, MAX_ROUND_EXTRAS, foodMultiplier } from "../src/rules/cards.js";
+import { RULE_CARDS, MODIFIERS, pickRuleCard, rollModifiers, rollLaws, rollRoundExtras, capRoundExtras, MAX_ROUND_EXTRAS, foodMultiplier, resolveBellTick, DEFAULT_BELL_TICKS, SHORT_BELL_TICKS } from "../src/rules/cards.js";
 
 describe("rule cards", () => {
   it("every card is well-formed", () => {
@@ -87,5 +87,29 @@ describe("rule-card modifiers", () => {
       rollLaws("heavy-laws", 80, 80),
     );
     expect(trimmed.modifiers.length + trimmed.laws.length).toBeLessThanOrEqual(3);
+  });
+
+  it("does not stack the poison modifier on a card that already poisons food", () => {
+    const card = RULE_CARDS.find((c) => c.id === "forbidden_orchard")!;
+    expect(card.poisonValue).toBe(3);
+    for (let i = 0; i < 300; i++) {
+      const mods = rollModifiers(`poison-card-${i}`, card);
+      expect(mods.some((m) => m.id === "poison")).toBe(false);
+    }
+  });
+
+  it("never rolls more than MAX_ROUND_EXTRAS modifiers plus laws combined", () => {
+    for (let i = 0; i < 2000; i++) {
+      const card = pickRuleCard(`extras-${i}`);
+      const { modifiers, laws } = rollRoundExtras(`extras-${i}`, 80, 80, card);
+      expect(modifiers.length + laws.length).toBeLessThanOrEqual(MAX_ROUND_EXTRAS);
+      expect(laws.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("defaults the bell to 200 ticks and shortens combat cards to 100", () => {
+    expect(resolveBellTick(pickRuleCard("classic-seed"), [], 5000)).toBe(DEFAULT_BELL_TICKS);
+    const glad = RULE_CARDS.find((c) => c.id === "gladiators")!;
+    expect(resolveBellTick(glad, [], 5000)).toBe(SHORT_BELL_TICKS);
   });
 });

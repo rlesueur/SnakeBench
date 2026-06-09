@@ -4,6 +4,7 @@ import type { GameConfig } from "../src/config.js";
 import {
   applyTransform,
   constraintViolation,
+  invertTransform,
   lethalFoodValue,
   obstaclesPassable,
   LAW_BUILDERS,
@@ -58,6 +59,17 @@ describe("law helpers (pure)", () => {
     expect(applyTransform("up", [LAW_BUILDERS.mirror("horizontal")])).toBe("up");
     expect(applyTransform("up", [LAW_BUILDERS.mirror("vertical")])).toBe("down");
     expect(applyTransform("left", [LAW_BUILDERS.mirror("vertical")])).toBe("left");
+  });
+
+  it("invertTransform undoes rotate and mirror laws", () => {
+    const rotate = [LAW_BUILDERS.rotate(1)];
+    expect(invertTransform(applyTransform("up", rotate), rotate)).toBe("up");
+    const mirror = [LAW_BUILDERS.mirror("horizontal")];
+    expect(invertTransform(applyTransform("left", mirror), mirror)).toBe("left");
+    const both = [LAW_BUILDERS.rotate(2), LAW_BUILDERS.mirror("vertical")];
+    for (const d of ["up", "down", "left", "right"] as const) {
+      expect(invertTransform(applyTransform(d, both), both)).toBe(d);
+    }
   });
 
   it("no_turn flags only the banned turn", () => {

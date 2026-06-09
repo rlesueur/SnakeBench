@@ -10,11 +10,12 @@ import { Game, type SnakeSpec } from "../engine/game.js";
 import { Rng } from "../rng.js";
 import { BASELINE_COUNT, BASELINE_KINDS, BASELINE_ROSTER, baselineIntent } from "../npc/baselines.js";
 import { NPC_REGISTRY, NPC_ANCHOR, type NpcKind } from "../npc/bots.js";
+import { npcSubmittedMove } from "../npc/helpers.js";
 import { DIRECTIONS, DELTA, type Direction, type Cell, type Snake, cellKey } from "../types.js";
 import { analyseMove, type MoveContext, SPACE_CAP } from "../engine/decision-quality.js";
 import { expandStandings, DEFAULT_RATING, DEFAULT_RD } from "../rating/glicko2.js";
 import { buildAgentView, type RecentMove } from "./view.js";
-import { pickRuleCard, rollRoundExtras, foodMultiplier, type RuleCard, type Modifier } from "../rules/cards.js";
+import { pickRuleCard, rollRoundExtras, foodMultiplier, resolveBellTick, type RuleCard, type Modifier } from "../rules/cards.js";
 import { type Law, applyTransform } from "../engine/laws.js";
 import { parseIntent, sanitiseTarget, type Intent } from "./intent.js";
 import { fullSnapshot, staticMap, type SpectatorFrame } from "./snapshot.js";
@@ -640,7 +641,7 @@ export class Arena {
     const height = Math.max(minSide, Math.round(dims.height * scale));
 
     // Roll modifiers and laws (capped at three combined extras on the base card).
-    const { modifiers: mods, laws } = rollRoundExtras(seed, width, height);
+    const { modifiers: mods, laws } = rollRoundExtras(seed, width, height, card);
     this.roundMods = mods;
     this.roundLaws = laws;
 
@@ -671,7 +672,6 @@ export class Arena {
     const margin = 5;
     let scoreZone: GameConfig["scoreZone"];
     let waypoints: GameConfig["waypoints"];
-    let bellTick: number | undefined;
     if (card.objective === "zone") {
       const zw = Math.max(8, Math.round(width * 0.22));
       const zh = Math.max(8, Math.round(height * 0.22));
@@ -691,14 +691,9 @@ export class Arena {
         });
       }
       waypoints = pts;
-    } else if (card.objective === "bell") {
-      bellTick = Math.min(maxTicks, 120 + orng.int(120));
     }
-    // Every round gets a hard turn limit so a lone survivor cannot run forever.
-    if (bellTick == null) {
-      bellTick = Math.min(maxTicks, 120 + orng.int(120));
-    }
-    const effectiveMaxTicks = bellTick ?? maxTicks;
+    const bellTick = resolveBellTick(card, mods, maxTicks);
+    const effectiveMaxTicks = bellTick;
 
     const roundConfig = {
       ...this.config,
@@ -834,7 +829,13 @@ export class Arena {
     if (!base || base.pendingMove !== null) return;
     const npc = this.npc.get(snakeId);
     if (!npc) return;
-    base.pendingMove = NPC_REGISTRY[npc.kind]!.decide(this.game, snakeId, npc.rng);
+    base.pendingMove = npcSubmittedMove(
+      this.game,
+      snakeId,
+      NPC_REGISTRY[npc.kind]!.decide,
+      npc.rng,
+      this.roundLaws,
+    );
     this.hooks.broadcastSpectators({
       type: "locked_in",
       id: snakeId,
@@ -918,7 +919,16 @@ export class Arena {
       }
       const npc = this.npc.get(snake.id);
       if (npc) {
-        moves.set(snake.id, NPC_REGISTRY[npc.kind]!.decide(game, snake.id, npc.rng));
+        moves.set(
+          snake.id,
+          npcSubmittedMove(
+            game,
+            snake.id,
+            NPC_REGISTRY[npc.kind]!.decide,
+            npc.rng,
+            this.roundLaws,
+          ),
+        );
       }
     }
 
@@ -1187,14 +1197,21 @@ export class Arena {
     return n;
   }
 
+  /** Scored humans + baselines still alive (filler NPCs excluded). */
+  private scoredAliveCount(game: Game): number {
+    let n = 0;
+    for (const id of this.roundAccounts.keys()) {
+      if (game.snakeById(id)?.alive) n += 1;
+    }
+    return n;
+  }
+
   /** Decide whether (and why) the round should end this tick. */
   private endReason(game: Game): string | null {
-    // Every round has a turn limit (maxTicks == its bell tick): on a "bell" round
-    // that limit IS the win condition; on every other round it's the safety cap
-    // that stops a never-dying snake dragging the round on forever. Either way the
-    // round ends here and is scored exactly as it stands.
+    // Every round has a turn limit (maxTicks == its bell tick). When it is reached
+    // the bell ends the round and standings are frozen exactly as they stand.
     if (game.tick >= game.config.maxTicks) {
-      return this.roundCard.objective === "bell" ? "bell" : "time_limit";
+      return "bell";
     }
     const alive = game.aliveSnakes().length;
     if (alive === 0) return "all_dead";
@@ -1206,14 +1223,10 @@ export class Arena {
         return "objective_complete";
       }
     }
-    if (this.roundHasAgents) {
-      // Human/LLM round: run until every connected agent is out.
-      if (this.aliveAgentCount(game) === 0) return "agents_eliminated";
-    } else {
-      // Baseline benchmark round (no human connected): run the full tick budget;
-      // end early only once every baseline is eliminated.
-      const anyBaselineAlive = BASELINE_ROSTER.some((b) => game.snakeById(b.id)?.alive);
-      if (!anyBaselineAlive) return "baselines_eliminated";
+    // End once every scored competitor (agents + baselines) is out; filler NPCs
+    // can keep playing for spectators until the bell or a total wipe.
+    if (this.roundAccounts.size > 0 && this.scoredAliveCount(game) === 0) {
+      return "competitors_eliminated";
     }
     // Stalemate: a few survivors circling without dying. End so the next round
     // can start rather than waiting out the full tick cap.

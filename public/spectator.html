@@ -39,6 +39,22 @@
         box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
       }
       .chip b { color: #5fd0ff; }
+      .chip.bell-chip { gap: 4px; }
+      .chip.bell-warn {
+        border-color: rgba(255, 200, 90, 0.55);
+        color: #ffe8b8;
+      }
+      .chip.bell-warn b { color: #ffd060; }
+      .chip.bell-urgent {
+        border-color: rgba(255, 120, 90, 0.65);
+        color: #ffd4c8;
+        animation: bellPulse 1.2s ease-in-out infinite;
+      }
+      .chip.bell-urgent b { color: #ff9a70; }
+      @keyframes bellPulse {
+        0%, 100% { box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35); }
+        50% { box-shadow: 0 0 22px rgba(255, 120, 80, 0.45); }
+      }
       .chip.title { font-size: 15px; letter-spacing: .2px; }
       a.chip.link { text-decoration: none; color: #bfe0ff; cursor: pointer; }
       a.chip.link:hover { border-color: #5fd0ff; color: #eaf4fb; }
@@ -354,6 +370,7 @@
       <a class="chip link" href="/guide.html">How to play</a>
       <a class="chip link" href="/faq.html">Rules &amp; FAQ</a>
       <span class="chip">Round <b id="round">–</b> · Tick <b id="tick">0</b> · <b id="alive">0</b> alive</span>
+      <span class="chip bell-chip" id="bellChip" style="display:none">🔔 <b id="bellInfo">–</b></span>
       <span class="chip" id="deliberateChip" style="display:none">⏳ <b id="delibInfo">–</b></span>
       <span class="chip" id="followChip">Following <b id="followName">–</b><span class="x" id="unfollow">✕</span></span>
     </div>
@@ -420,6 +437,8 @@
         round: document.getElementById("round"),
         tick: document.getElementById("tick"),
         alive: document.getElementById("alive"),
+        bellChip: document.getElementById("bellChip"),
+        bellInfo: document.getElementById("bellInfo"),
         lb: document.getElementById("leaderboard"),
         stats: document.getElementById("stats"),
         lbExpandBtn: document.getElementById("lbExpandBtn"),
@@ -461,6 +480,7 @@
       // locked in, and the ceiling — set on a `deliberation` msg, cleared on the
       // next frame (the reveal). Drives the thinking rings + HUD countdown.
       let think = null;  // { tick, ceiling, start, ids:Set, names:Map, locked:Set }
+      let lastBellWarnKey = "";
       // Moves are revealed crisply over REVEAL_MS, then the board HOLDS for the
       // rest of the (variable) window while agents think — instead of smearing one
       // cell of motion across the whole 10s. This is the pipelined reveal.
@@ -1262,8 +1282,9 @@
         currentRules = r;
         const mods = Array.isArray(r.modifiers) ? r.modifiers : [];
         const laws = Array.isArray(r.laws) ? r.laws : [];
+        const extraN = mods.length + laws.length;
         els.ruleName.textContent =
-          (r.name || "—") + (mods.length ? " +" + mods.length : "") + (laws.length ? " ⚖" + laws.length : "");
+          (r.name || "—") + (extraN ? ` · ${extraN} twist${extraN === 1 ? "" : "es"}` : "");
         // Card brief, each active twist, then each LAW on its own emphasised line.
         let briefHtml = `<span>${escapeHtml(r.brief || "")}</span>`;
         for (const m of mods) {
@@ -1278,7 +1299,7 @@
           pill(FOOD_LABEL[r.food] || r.food, r.food === "scarce") +
           (r.food_grows === false ? pill("Food doesn't feed you", true) : "") +
           (r.poison_value ? pill("Big food = poison ☠", true) : "") +
-          (r.bell_tick ? pill((r.objective === "bell" ? "Bell @ tick " : "Ends @ tick ") + r.bell_tick, true) : "") +
+          (r.bell_tick ? pill("Bell @ tick " + r.bell_tick, true) : "") +
           mods.map((m) => pill(m.name, true)).join("") +
           laws.map((l) => pill("⚖ " + l.title, true)).join("");
 
@@ -1300,6 +1321,33 @@
           if (laws.length)
             entries.push('⚖ law in force — read the rules panel');
           dyn.innerHTML = entries.map((e) => `&nbsp;<span class="dotleg">${e}</span>`).join("");
+        }
+        if (cur) updateBellChip(cur.tick);
+      }
+
+      function updateBellChip(tick) {
+        const bt = currentRules?.bell_tick;
+        if (!bt || tick == null || tick < 0) {
+          els.bellChip.style.display = "none";
+          return;
+        }
+        els.bellChip.style.display = "";
+        const left = Math.max(0, bt - tick);
+        els.bellChip.className =
+          "chip bell-chip" +
+          (left <= 10 ? " bell-urgent" : left <= 30 ? " bell-warn" : "");
+        if (left === 0) {
+          els.bellInfo.textContent = `Bell rung @ tick ${bt}`;
+        } else {
+          els.bellInfo.textContent = `Bell @ tick ${bt} · ${left} left`;
+        }
+        for (const mark of [30, 20, 10, 5]) {
+          if (left !== mark) continue;
+          const key = `${els.round.textContent}-${mark}`;
+          if (lastBellWarnKey === key) break;
+          lastBellWarnKey = key;
+          pushFeed(`🔔 Bell in ${mark} tick${mark === 1 ? "" : "s"} (tick ${bt})`, mark <= 10 ? "frenzy" : "info");
+          break;
         }
       }
 
@@ -1640,6 +1688,7 @@
         if (msg.frame) {
           ingestFrame(msg.frame);
           els.tick.textContent = msg.frame.tick;
+          updateBellChip(msg.frame.tick);
         }
         if (msg.rules) renderRules(msg.rules);
         applyDeliberation(msg.deliberation);
@@ -1669,6 +1718,7 @@
           applyInit(msg);
         } else if (msg.type === "round_start") {
           awaitingRound = false;
+          lastBellWarnKey = "";
           if (!synced) applyInit({ waiting: false, intermission: false, round: msg.round, world: msg.world, obstacles: msg.obstacles, frame: null, rules: msg.rules, deliberation: null, next_round_in_ms: null });
           clearCountdown();
           think = null;
@@ -1691,6 +1741,7 @@
           ingestEvents(msg.events);
           casterFromNotes(cur.notes);
           els.tick.textContent = msg.frame.tick;
+          updateBellChip(msg.frame.tick);
         } else if (msg.type === "deliberation") {
           applyDeliberation(msg);
         } else if (msg.type === "locked_in") {
@@ -1708,19 +1759,24 @@
         } else if (msg.type === "round_end") {
           think = null;
           if (msg.rules) renderRules(msg.rules);
+          const bellAt = msg.rules?.bell_tick;
           const why = {
             all_dead: "everyone died",
             last_standing: "last snake standing",
             agents_eliminated: "all agents out",
             baselines_eliminated: "all baselines out",
-            time_limit: "time limit",
+            competitors_eliminated: "all competitors out",
+            time_limit: bellAt ? `bell at tick ${bellAt}` : "bell",
             stalemate: "stalemate",
-            bell: "the bell",
+            bell: bellAt ? `bell at tick ${bellAt}` : "the bell",
             objective_complete: "objective complete",
           }[msg.reason] || msg.reason || "";
           const top = msg.standings[0]?.display_name ?? "?";
           const title = `Round ${msg.round}: ${top} won`;
           const detail = why ? `(${why})` : "";
+          if (msg.reason === "bell" || msg.reason === "time_limit") {
+            pushFeed(`🔔 Bell at tick ${bellAt ?? "?"} — round ended`, "frenzy");
+          }
           const h = msg.highlights;
           if (h) {
             if (h.survivor) {

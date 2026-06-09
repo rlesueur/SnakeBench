@@ -109,6 +109,23 @@ export function applyTransform(submitted: Direction, laws: readonly Law[]): Dire
   return d;
 }
 
+/** Undo transform laws so a bot can pick the screen-space move it wants and
+ * convert it into the direction it must submit. Mirror is self-inverse; rotate
+ * inverts by turning the other way. */
+export function invertTransform(intended: Direction, laws: readonly Law[]): Direction {
+  let d = intended;
+  for (let i = laws.length - 1; i >= 0; i--) {
+    const law = laws[i]!;
+    if (law.kind === "rotate") {
+      const q = ((4 - law.quarters) % 4) as 1 | 2 | 3;
+      d = rotateDir(d, q);
+    } else if (law.kind === "mirror") {
+      d = mirrorDir(d, law.axis);
+    }
+  }
+  return d;
+}
+
 /** Relative turn taken when heading changes from `prev` to `next`. */
 function turnOf(prev: Direction, next: Direction): "straight" | "left" | "right" | "back" {
   if (next === prev) return "straight";
