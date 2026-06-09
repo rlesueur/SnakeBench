@@ -1,5 +1,5 @@
 import type { Game } from "../engine/game.js";
-import { invertTransform, lethalFoodValue } from "../engine/laws.js";
+import { invertTransform, lethalFoodValue, type Law } from "../engine/laws.js";
 import type { Rng } from "../rng.js";
 import {
   type Cell,
