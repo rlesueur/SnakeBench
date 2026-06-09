@@ -218,6 +218,94 @@ describe("arena round lifecycle", () => {
     arena.stop();
   });
 
+  it("ensureTickLoop recovers when the tick timer was lost mid-round", () => {
+    const spectator: any[] = [];
+    const arena = new Arena(
+      { broadcastSpectators: (m) => spectator.push(m) },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 5000, maxTicks: 50, obstacleDensity: 0 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, roundRestartDelayMs: 1_000_000 },
+      null,
+      null,
+    );
+
+    arena.start();
+    const framesBefore = spectator.filter((m) => m.type === "frame").length;
+
+    // Simulate resolveTick crashing after clearing the ceiling timer.
+    (arena as unknown as { tickTimer: NodeJS.Timeout | null }).tickTimer = null;
+
+    arena.ensureTickLoop();
+    vi.advanceTimersByTime(1200);
+
+    const framesAfter = spectator.filter((m) => m.type === "frame").length;
+    expect(framesAfter).toBeGreaterThan(framesBefore);
+
+    arena.stop();
+  });
+
+  it("stop() halts the tick loop and prevents new rounds", () => {
+    const spectator: any[] = [];
+    const arena = new Arena(
+      { broadcastSpectators: (m) => spectator.push(m) },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 5000, maxTicks: 50, obstacleDensity: 0 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, roundRestartDelayMs: 1_000_000 },
+      null,
+      null,
+    );
+    arena.start();
+    expect(arena.isRoundLive()).toBe(true);
+    const framesBefore = spectator.filter((m) => m.type === "frame").length;
+
+    arena.stop();
+    expect(arena.isRoundLive()).toBe(false);
+    vi.advanceTimersByTime(60_000);
+    const framesAfter = spectator.filter((m) => m.type === "frame").length;
+    expect(framesAfter).toBe(framesBefore);
+  });
+
+  it("watchdog re-arms a stalled tick loop", () => {
+    const spectator: any[] = [];
+    const arena = new Arena(
+      { broadcastSpectators: (m) => spectator.push(m) },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 5000, maxTicks: 50, obstacleDensity: 0 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, roundRestartDelayMs: 1_000_000 },
+      null,
+      null,
+    );
+    arena.start();
+    const framesBefore = spectator.filter((m) => m.type === "frame").length;
+
+    (arena as unknown as { tickTimer: NodeJS.Timeout | null }).tickTimer = null;
+    vi.advanceTimersByTime(15_000);
+    vi.advanceTimersByTime(1200);
+
+    const framesAfter = spectator.filter((m) => m.type === "frame").length;
+    expect(framesAfter).toBeGreaterThan(framesBefore);
+
+    arena.stop();
+  });
+
+  it("re-add after removeAgent restores arena membership", () => {
+    const arena = new Arena(
+      { broadcastSpectators: () => {} },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 5000, maxTicks: 50, obstacleDensity: 0 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, roundRestartDelayMs: 1_000_000, joinGraceMs: 1 },
+      null,
+      null,
+    );
+    const a = fakeAgent("alice");
+    arena.addAgent(a);
+    arena.start();
+    arena.removeAgent("alice");
+    arena.addAgent(a);
+    arena.catchUpAgent(a);
+
+    const state = a.inbox.find((m) => m.type === "state");
+    expect(state).toBeTruthy();
+
+    arena.stop();
+  });
+
   it("ignores stale-tick actions but accepts current-tick moves", () => {
     const arena = new Arena(
       { broadcastSpectators: () => {} },

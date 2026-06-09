@@ -41,6 +41,7 @@ const AGENT_MSGS_PER_MIN = Number(process.env.AGENT_MSGS_PER_MIN) || 120;
 // Global cap on distinct agent WebSocket connections (one per account).
 const MAX_AGENT_CONNECTIONS = Number(process.env.MAX_AGENT_CONNECTIONS) || 100;
 const ALLOW_STATIC_KEYS = process.env.ALLOW_STATIC_KEYS === "1";
+let shuttingDown = false;
 
 const users = new UserStore();
 // Static keys remain available only as an explicit dev/admin escape hatch.
@@ -83,13 +84,20 @@ function broadcastSpectators(msg: unknown): void {
     if (now - lastFrameAt < 1000 / SPECTATOR_MAX_FPS) return; // drop to cap egress
     lastFrameAt = now;
   }
-  const data = JSON.stringify(msg);
+  let data: string;
+  try {
+    data = JSON.stringify(msg);
+  } catch (err) {
+    console.error("spectator broadcast serialise failed:", err);
+    return;
+  }
   for (const ws of spectators) {
     if (ws.readyState !== WebSocket.OPEN) continue;
     try {
       ws.send(data);
     } catch (err) {
       console.warn("spectator broadcast failed:", (err as Error).message);
+      spectators.delete(ws);
     }
   }
 }
@@ -212,6 +220,7 @@ function staticContentType(file: string): string {
   return STATIC_TYPES[ext] ?? "application/octet-stream";
 }
 const httpServer = createServer(async (req, res) => {
+  try {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
   const method = req.method ?? "GET";
@@ -436,6 +445,10 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
   res.writeHead(404).end("Not found");
+  } catch (err) {
+    console.error("HTTP handler error:", err);
+    if (!res.headersSent) sendJson(res, 500, { error: "Internal server error." });
+  }
 });
 
 // Reject oversized frames before they are buffered/parsed (abuse / DoS guard).
@@ -458,7 +471,14 @@ function snakeIdForAccount(accountKey: string): string {
   return `agent_${accountKey.slice("static:".length)}`;
 }
 
-httpServer.on("upgrade", async (req, socket, head) => {
+httpServer.on("upgrade", (req, socket, head) => {
+  void (async () => {
+  try {
+  if (shuttingDown) {
+    socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+    socket.destroy();
+    return;
+  }
   const url = new URL(req.url ?? "/", "http://localhost");
   const ip = clientIp(req);
   if (url.pathname === "/agent") {
@@ -513,6 +533,12 @@ httpServer.on("upgrade", async (req, socket, head) => {
   } else {
     socket.destroy();
   }
+  } catch (err) {
+    console.error("upgrade error:", err);
+    try { socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n"); } catch { /* ignore */ }
+    socket.destroy();
+  }
+  })();
 });
 
 function sendAgent(ws: WebSocket, msg: unknown): void {
@@ -525,6 +551,10 @@ function sendAgent(ws: WebSocket, msg: unknown): void {
 }
 
 agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: string) => {
+  if (shuttingDown) {
+    ws.close(1001, "server shutting down");
+    return;
+  }
   const snakeId = snakeIdForAccount(accountKey);
   const session = {
     snakeId,
@@ -564,14 +594,24 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
   sendAgent(ws, { type: "sync" });
   setImmediate(() => {
     if (ws.readyState !== WebSocket.OPEN) return;
-    session.send({
-      type: "welcome",
-      you_id: snakeId,
-      config,
-      docs: { skill: "/api/skill", guide: "/api/guide", human: "/guide.html" },
-    });
-    arena.addAgent(session);
-    arena.catchUpAgent(session);
+    if (agentWsByAccount.get(accountKey) !== ws) return;
+    try {
+      session.send({
+        type: "welcome",
+        you_id: snakeId,
+        config,
+        docs: { skill: "/api/skill", guide: "/api/guide", human: "/guide.html" },
+      });
+      arena.addAgent(session);
+      arena.catchUpAgent(session);
+      arena.ensureTickLoop();
+    } catch (err) {
+      console.error(`Agent handshake failed for ${displayName}:`, err);
+      if (agentWsByAccount.get(accountKey) === ws) {
+        arena.removeAgent(snakeId);
+        try { ws.close(1011, "handshake failed"); } catch { /* ignore */ }
+      }
+    }
   });
   console.log(`Agent connected: ${displayName} (${snakeId})`);
 
@@ -612,25 +652,31 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
     if (msg.type === "action" && typeof msg.tick === "number" && typeof msg.move === "string") {
       resetIdle();
       const note = typeof msg.note === "string" ? msg.note : null;
-      arena.submitAction(
-        snakeId,
-        msg.tick,
-        msg.move,
-        msg.log ?? null,
-        note,
-        msg.intent ?? null,
-        msg.target ?? null,
-      );
+      try {
+        arena.submitAction(
+          snakeId,
+          msg.tick,
+          msg.move,
+          msg.log ?? null,
+          note,
+          msg.intent ?? null,
+          msg.target ?? null,
+        );
+      } catch (err) {
+        console.error(`submitAction failed for ${displayName}:`, err);
+      }
     }
   });
+
+  ws.on("error", (err) => console.warn(`Agent WS error (${displayName}):`, err.message));
 
   ws.on("close", () => {
     clearInterval(pingIv);
     clearTimeout(idleTimer);
-    arena.removeAgent(snakeId);
-    // Only clear the account slot if it still points at THIS socket (a newer
-    // connection may have already replaced us).
-    if (agentWsByAccount.get(accountKey) === ws) agentWsByAccount.delete(accountKey);
+    if (agentWsByAccount.get(accountKey) === ws) {
+      agentWsByAccount.delete(accountKey);
+      arena.removeAgent(snakeId);
+    }
     console.log(`Agent disconnected: ${displayName} (${snakeId})`);
   });
 });
@@ -645,15 +691,22 @@ function sendSpectator(ws: WebSocket, msg: unknown): void {
 }
 
 spectatorWss.on("connection", (ws: WebSocket, ip: string) => {
+  if (shuttingDown) {
+    ws.close(1001, "server shutting down");
+    return;
+  }
   pendingSpectators += 1;
   spectatorsByIp.set(ip, (spectatorsByIp.get(ip) ?? 0) + 1);
   let subscribed = false;
+  let handshakeDone = false;
   const subscribe = () => {
     if (subscribed) return;
     subscribed = true;
     spectators.add(ws);
   };
   const finishHandshake = () => {
+    if (handshakeDone) return;
+    handshakeDone = true;
     if (pendingSpectators > 0) pendingSpectators -= 1;
     if (ws.readyState === WebSocket.OPEN) subscribe();
   };
@@ -702,10 +755,11 @@ spectatorWss.on("connection", (ws: WebSocket, ip: string) => {
     ws.ping();
     sendSpectator(ws, { type: "heartbeat", ts: Date.now() });
   }, 25_000);
+  ws.on("error", (err) => console.warn("Spectator WS error:", err.message));
   ws.on("close", () => {
     clearInterval(pingIv);
     if (subscribed) spectators.delete(ws);
-    else if (pendingSpectators > 0) pendingSpectators -= 1;
+    else if (!handshakeDone && pendingSpectators > 0) pendingSpectators -= 1;
     const n = (spectatorsByIp.get(ip) ?? 1) - 1;
     if (n <= 0) spectatorsByIp.delete(ip);
     else spectatorsByIp.set(ip, n);
@@ -755,14 +809,20 @@ async function main(): Promise<void> {
   });
 }
 
-let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`\n${signal} received — shutting down.`);
   arena.stop();
-  for (const ws of spectators) ws.close();
-  httpServer.close();
+  for (const ws of agentWsByAccount.values()) {
+    try { ws.close(1001, "server shutting down"); } catch { /* ignore */ }
+  }
+  agentWsByAccount.clear();
+  for (const ws of spectators) {
+    try { ws.close(1001, "server shutting down"); } catch { /* ignore */ }
+  }
+  spectators.clear();
+  await new Promise<void>((resolve) => httpServer.close(() => resolve()));
   await closePool().catch(() => {});
   process.exit(0);
 }

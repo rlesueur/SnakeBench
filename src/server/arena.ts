@@ -247,12 +247,19 @@ export class Arena {
   /** When the current decision window opened (ms since epoch). Cleared on resolve. */
   private deliberationStartedAt = 0;
   private tickTimer: NodeJS.Timeout | null = null;
+  /** Guards against concurrent resolveTick (timer + early-resolve racing). */
+  private resolving = false;
+  /** Set by stop(); blocks timer callbacks and new rounds during shutdown. */
+  private stopped = false;
   private restartTimer: NodeJS.Timeout | null = null;
   /** When the next round is scheduled to begin (epoch ms). 0 = none pending. */
   private restartAt = 0;
   /** Grace window after the first agent joins an ambient lobby, so a burst of
    * agents arriving together all start in the same round. */
   private joinTimer: NodeJS.Timeout | null = null;
+  /** Periodic check that the tick loop and restart timers are armed. */
+  private watchTimer: NodeJS.Timeout | null = null;
+  private static readonly WATCHDOG_MS = 15_000;
   private frames: SpectatorFrame[] = [];
   private readonly baseSeed: string;
 
@@ -282,17 +289,48 @@ export class Arena {
   }
 
   start(): void {
+    this.stopped = false;
+    this.armWatchdog();
     this.startRound();
   }
 
   stop(): void {
+    this.stopped = true;
+    this.resolving = false;
+    this.roundActive = false;
+    this.game = null;
     this.clearBaselineTimers();
     if (this.tickTimer) clearTimeout(this.tickTimer);
     if (this.restartTimer) clearTimeout(this.restartTimer);
     if (this.joinTimer) clearTimeout(this.joinTimer);
+    if (this.watchTimer) clearInterval(this.watchTimer);
     this.tickTimer = null;
     this.restartTimer = null;
     this.joinTimer = null;
+    this.watchTimer = null;
+  }
+
+  /** True when a round is in progress and the tick loop should be advancing. */
+  isRoundLive(): boolean {
+    return !this.stopped && this.roundActive && this.game !== null;
+  }
+
+  private armWatchdog(): void {
+    if (this.watchTimer) clearInterval(this.watchTimer);
+    this.watchTimer = setInterval(() => this.runWatchdog(), Arena.WATCHDOG_MS);
+  }
+
+  /** Safety net: re-arm a stalled tick loop or kick a round if nothing is scheduled. */
+  private runWatchdog(): void {
+    if (this.stopped) return;
+    if (this.roundActive && this.game) {
+      this.ensureTickLoop();
+      return;
+    }
+    if (!this.roundActive && !this.game && !this.restartTimer && !this.joinTimer) {
+      console.warn("Arena idle with no restart scheduled; starting a round.");
+      this.startRound();
+    }
   }
 
   getConfig(): GameConfig {
@@ -428,6 +466,7 @@ export class Arena {
   }
 
   addAgent(session: AgentSession): void {
+    if (this.stopped) return;
     const wasEmpty = this.agents.size === 0;
     this.agents.set(session.snakeId, session);
 
@@ -477,12 +516,16 @@ export class Arena {
     // Let spectators tick this snake over to "locked in" for the live beat (once
     // per tick — a resubmit just updates the move, not the lock-in state).
     if (firstThisTick) {
-      this.hooks.broadcastSpectators({
-        type: "locked_in",
-        id: snakeId,
-        name: session.displayName,
-        tick,
-      });
+      try {
+        this.hooks.broadcastSpectators({
+          type: "locked_in",
+          id: snakeId,
+          name: session.displayName,
+          tick,
+        });
+      } catch (err) {
+        console.error(`locked_in broadcast failed for ${snakeId}:`, err);
+      }
     }
     // Server-measured decision latency for this move (state-sent -> action-in).
     session.lastLatencyMs = session.lastSentAt ? Date.now() - session.lastSentAt : null;
@@ -533,6 +576,7 @@ export class Arena {
    * never crash the arena — log it and retry rather than throwing out of a
    * timer callback. */
   private startRound(): void {
+    if (this.stopped) return;
     try {
       this.beginRound();
     } catch (err) {
@@ -782,15 +826,20 @@ export class Arena {
    * deliberation + timer, arm the ceiling. Same path WebSocket agents use. */
   private openDecisionWindow(): void {
     if (!this.game) return;
-    this.clearBaselineTimers();
-    for (const session of this.agents.values()) session.pendingMove = null;
-    for (const base of this.baselineSessions.values()) base.pendingMove = null;
+    try {
+      this.clearBaselineTimers();
+      for (const session of this.agents.values()) session.pendingMove = null;
+      for (const base of this.baselineSessions.values()) base.pendingMove = null;
 
-    this.sendStateToAgents();
-    this.broadcastDeliberation();
-    this.scheduleBaselineSubmissions();
-    this.armTick();
-    this.maybeResolveEarly();
+      this.sendStateToAgents();
+      this.broadcastDeliberation();
+      this.scheduleBaselineSubmissions();
+      this.armTick();
+      this.maybeResolveEarly();
+    } catch (err) {
+      console.error("openDecisionWindow failed:", err);
+      this.recoverFromTickFailure();
+    }
   }
 
   /** Cancel any in-flight baseline lock-in timers (window closed or round ended). */
@@ -820,7 +869,14 @@ export class Arena {
       const slot = alive.length > 1 ? Math.floor((i * spread) / (alive.length - 1)) : 0;
       const delay = minMs + slot + npc.rng.int(Math.min(80, Math.max(1, Math.floor(spread / 8))));
       i += 1;
-      const timer = setTimeout(() => this.submitBaselineMove(snakeId, tick), delay);
+      const timer = setTimeout(() => {
+        try {
+          this.submitBaselineMove(snakeId, tick);
+        } catch (err) {
+          console.error(`Baseline move failed for ${snakeId}:`, err);
+          this.ensureTickLoop();
+        }
+      }, delay);
       this.baselineTimers.push(timer);
     }
   }
@@ -839,12 +895,16 @@ export class Arena {
       npc.rng,
       this.roundLaws,
     );
-    this.hooks.broadcastSpectators({
-      type: "locked_in",
-      id: snakeId,
-      name: base.displayName,
-      tick,
-    });
+    try {
+      this.hooks.broadcastSpectators({
+        type: "locked_in",
+        id: snakeId,
+        name: base.displayName,
+        tick,
+      });
+    } catch (err) {
+      console.error(`baseline locked_in broadcast failed for ${snakeId}:`, err);
+    }
     this.maybeResolveEarly();
   }
 
@@ -899,6 +959,70 @@ export class Arena {
   }
 
   private resolveTick(): void {
+    if (this.stopped || !this.roundActive || !this.game) return;
+    if (this.resolving) {
+      setImmediate(() => this.ensureTickLoop());
+      return;
+    }
+    this.resolving = true;
+    try {
+      this.resolveTickInner();
+    } catch (err) {
+      console.error(`Tick ${this.game?.tick ?? "?"} failed; recovering:`, err);
+      this.recoverFromTickFailure();
+    } finally {
+      this.resolving = false;
+    }
+  }
+
+  /** Re-arm the tick loop if a round is active but no ceiling timer is running
+   * (e.g. resolveTick threw after clearing tickTimer). Safe to call anytime. */
+  ensureTickLoop(): void {
+    if (this.stopped || !this.roundActive || !this.game || this.resolving) return;
+    if (this.tickTimer !== null) return;
+    console.warn(`Tick loop stalled at tick ${this.game.tick}; recovering.`);
+    try {
+      this.openDecisionWindow();
+    } catch (err) {
+      console.error("Tick loop recovery failed; restarting round:", err);
+      this.scheduleRoundRestart();
+    }
+  }
+
+  private recoverFromTickFailure(): void {
+    if (this.stopped) return;
+    if (!this.roundActive || !this.game) {
+      if (!this.restartTimer && !this.stopped) this.startRound();
+      return;
+    }
+    this.clearBaselineTimers();
+    this.deliberationStartedAt = 0;
+    if (this.tickTimer) {
+      clearTimeout(this.tickTimer);
+      this.tickTimer = null;
+    }
+    this.ensureTickLoop();
+  }
+
+  private scheduleRoundRestart(): void {
+    if (this.stopped) return;
+    this.clearBaselineTimers();
+    this.roundActive = false;
+    this.deliberationStartedAt = 0;
+    if (this.tickTimer) {
+      clearTimeout(this.tickTimer);
+      this.tickTimer = null;
+    }
+    this.game = null;
+    this.restartAt = Date.now() + this.serverConfig.roundRestartDelayMs;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = setTimeout(() => {
+      this.restartAt = 0;
+      this.startRound();
+    }, this.serverConfig.roundRestartDelayMs);
+  }
+
+  private resolveTickInner(): void {
     if (!this.roundActive || !this.game) return;
     this.clearBaselineTimers();
     this.deliberationStartedAt = 0;
@@ -993,7 +1117,12 @@ export class Arena {
 
     const reason = this.endReason(game);
     if (reason) {
-      this.endRound(reason);
+      try {
+        this.endRound(reason);
+      } catch (err) {
+        console.error(`endRound failed (${reason}); forcing restart:`, err);
+        this.scheduleRoundRestart();
+      }
       return;
     }
 
@@ -1288,13 +1417,17 @@ export class Arena {
     if (!this.game || !this.roundActive) return;
     const snake = this.game.snakeById(session.snakeId);
     if (!snake || !snake.alive) return;
-    const deadline = Date.now() + this.game.config.tickDeadlineMs;
-    const rules = this.rulesPayload();
-    const view = buildAgentView(this.game, session.snakeId, deadline, session.recentMoves ?? []);
-    session.lastView = view;
-    session.lastViewTick = this.game.tick;
-    session.lastSentAt = Date.now();
-    session.send({ type: "state", state: view, rules });
+    try {
+      const deadline = Date.now() + this.game.config.tickDeadlineMs;
+      const rules = this.rulesPayload();
+      const view = buildAgentView(this.game, session.snakeId, deadline, session.recentMoves ?? []);
+      session.lastView = view;
+      session.lastViewTick = this.game.tick;
+      session.lastSentAt = Date.now();
+      session.send({ type: "state", state: view, rules });
+    } catch (err) {
+      console.warn(`sendStateToAgent failed for ${session.snakeId}:`, err);
+    }
   }
 
   private sendStateToAgents(): void {
@@ -1356,7 +1489,10 @@ export class Arena {
   }
 
   private endRound(reason: string): void {
-    if (!this.game) return;
+    if (!this.game) {
+      if (!this.stopped) this.scheduleRoundRestart();
+      return;
+    }
     this.clearBaselineTimers();
     this.roundActive = false;
     this.deliberationStartedAt = 0;
@@ -1365,6 +1501,7 @@ export class Arena {
       this.tickTimer = null;
     }
 
+    try {
     // Rank according to the round's rule card objective. Snakes still alive at
     // round end outrank those who died; remaining ties fall back to peak size.
     //  - survive: later death ranks higher.
@@ -1560,13 +1697,21 @@ export class Arena {
       session.send({ type: "round_end", round: this.round, reason, standings, your });
     }
 
-    this.saveReplay(standings);
-
-    this.restartAt = Date.now() + this.serverConfig.roundRestartDelayMs;
-    this.restartTimer = setTimeout(() => {
-      this.restartAt = 0;
-      this.startRound();
-    }, this.serverConfig.roundRestartDelayMs);
+    try {
+      this.saveReplay(standings);
+    } catch (err) {
+      console.error("saveReplay failed:", err);
+    }
+    } catch (err) {
+      console.error(`endRound failed (${reason}):`, err);
+    } finally {
+      this.restartAt = Date.now() + this.serverConfig.roundRestartDelayMs;
+      if (this.restartTimer) clearTimeout(this.restartTimer);
+      this.restartTimer = setTimeout(() => {
+        this.restartAt = 0;
+        this.startRound();
+      }, this.serverConfig.roundRestartDelayMs);
+    }
   }
 
   private saveReplay(standings: unknown): void {

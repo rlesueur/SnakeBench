@@ -1539,9 +1539,13 @@
       const RETRY_MAX_MS = 30_000;
       let lastConnectAt = 0;
       let lastWsMsgAt = 0;
+      let lastFrameAt = 0;
+      let initStartedAt = 0;
       let awaitingRound = true;
       let reconnectPending = false;
       const HEARTBEAT_STALE_MS = 75_000;
+      const FRAME_STALE_MS = 120_000;
+      const INIT_MAX_MS = 90_000;
       const PROBE_INTERVAL_MS = 12_000;
       const CONNECT_DEBOUNCE_MS = 500;
 
@@ -1566,6 +1570,7 @@
         synced = true;
         everSynced = true;
         connAttempts = 0;
+        initStartedAt = 0;
         clearInitTimer();
         touchWs();
       }
@@ -1574,8 +1579,14 @@
         lastWsMsgAt = Date.now();
       }
 
+      function touchFrame() {
+        lastFrameAt = Date.now();
+      }
+
       function forceReconnect(title, detail) {
         synced = false;
+        cur = prev = null;
+        think = null;
         closeActiveWs();
         setConnState("disconnected", title, detail || "Retrying automatically…");
         scheduleReconnect(RETRY_BASE_MS);
@@ -1621,6 +1632,10 @@
       function bumpInitTimeout() {
         const ws = activeWs;
         if (!ws || synced || ws.readyState !== WebSocket.OPEN) return;
+        if (initStartedAt && Date.now() - initStartedAt > INIT_MAX_MS) {
+          forceReconnect("Handshake timed out", "The server never sent a full game state. Retrying…");
+          return;
+        }
         armInitTimeout(ws);
       }
 
@@ -1729,6 +1744,7 @@
         if (msg.world) setWorld(msg.world);
         if (msg.frame) {
           ingestFrame(msg.frame);
+          touchFrame();
           els.tick.textContent = msg.frame.tick;
           updateBellChip(msg.frame.tick);
         }
@@ -1740,7 +1756,9 @@
       function handleSpectatorMsg(msg) {
         touchWs();
         if (msg.type === "heartbeat") {
-          if (!synced) bumpInitTimeout();
+          if (!synced && initStartedAt && Date.now() - initStartedAt > INIT_MAX_MS) {
+            forceReconnect("Handshake timed out", "Connected but no game state arrived. Retrying…");
+          }
           return;
         }
         // Only `init` completes the handshake — other messages may arrive while
@@ -1800,6 +1818,7 @@
           setConnState("live");
           think = null;
           ingestFrame(msg.frame, msg.notes);
+          touchFrame();
           ingestEvents(msg.events);
           casterFromNotes(cur.notes);
           els.tick.textContent = msg.frame.tick;
@@ -1905,6 +1924,7 @@
         ws.onopen = () => {
           if (ws !== activeWs || synced) return;
           clearOpenTimer();
+          initStartedAt = Date.now();
           touchWs();
           armInitTimeout(ws);
           els.connTitle.textContent = everSynced
@@ -1958,6 +1978,15 @@
         if (!navigator.onLine) return;
         const ws = activeWs;
         if (ws?.readyState === WebSocket.OPEN && synced) {
+          if (
+            lastFrameAt &&
+            !awaitingRound &&
+            !intermissionActive &&
+            Date.now() - lastFrameAt > FRAME_STALE_MS
+          ) {
+            forceReconnect("Game stalled", "No board updates from the server. Reconnecting…");
+            return;
+          }
           if (lastWsMsgAt && Date.now() - lastWsMsgAt > HEARTBEAT_STALE_MS) {
             forceReconnect("Live feed stalled", "No data from the server. Reconnecting…");
           }

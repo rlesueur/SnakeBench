@@ -115,6 +115,10 @@ const MAX_BACKOFF_MS = 30_000;
 const CONNECT_DEBOUNCE_MS = 500;
 const OPEN_TIMEOUT_MS = 25_000;
 const HANDSHAKE_TIMEOUT_MS = 45_000;
+/** Absolute wall-clock cap for pre-welcome handshake (heartbeats must not extend forever). */
+const HANDSHAKE_MAX_MS = 90_000;
+const STATE_WATCH_MS = 15_000;
+const STATE_STALE_MS = 120_000;
 
 function arenaHttpOrigin(arenaUrl: string): string {
   const wsBase = arenaUrl.replace(/\/$/, "");
@@ -160,8 +164,13 @@ export function runAgent(brain: Brain): void {
   let openTimer: ReturnType<typeof setTimeout> | null = null;
   let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   let handshaked = false;
+  let handshakeStartedAt = 0;
   let lastConnectAt = 0;
   let fatalAuth = false;
+  /** True while we expect periodic `state` messages (live in a round). */
+  let expectState = false;
+  let lastStateAt = 0;
+  let stateWatchTimer: ReturnType<typeof setInterval> | null = null;
 
   const clearReconnectTimer = (): void => {
     if (reconnectTimer) {
@@ -187,6 +196,9 @@ export function runAgent(brain: Brain): void {
 
   const closeActiveWs = (): void => {
     clearConnectTimers();
+    clearStateWatch();
+    expectState = false;
+    lastStateAt = 0;
     if (!activeWs) return;
     const ws = activeWs;
     activeWs = null;
@@ -200,13 +212,34 @@ export function runAgent(brain: Brain): void {
     }
   };
 
+  const clearStateWatch = (): void => {
+    if (stateWatchTimer) {
+      clearInterval(stateWatchTimer);
+      stateWatchTimer = null;
+    }
+  };
+
+  const armStateWatch = (ws: WebSocket): void => {
+    clearStateWatch();
+    stateWatchTimer = setInterval(() => {
+      if (ws !== activeWs || !handshaked || !expectState) return;
+      if (!lastStateAt || Date.now() - lastStateAt <= STATE_STALE_MS) return;
+      console.warn("No state from arena — reconnecting.");
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }, STATE_WATCH_MS);
+  };
+
   const scheduleReconnect = (delayMs: number): void => {
     if (fatalAuth) return;
     clearReconnectTimer();
     reconnectTimer = setTimeout(() => void boot(), delayMs);
   };
 
-  const markHandshaked = (): void => {
+  const markHandshaked = (ws: WebSocket): void => {
     if (handshaked) return;
     handshaked = true;
     backoff = MIN_BACKOFF_MS;
@@ -214,6 +247,7 @@ export function runAgent(brain: Brain): void {
       clearTimeout(handshakeTimer);
       handshakeTimer = null;
     }
+    armStateWatch(ws);
   };
 
   const armHandshakeTimeout = (ws: WebSocket): void => {
@@ -229,9 +263,24 @@ export function runAgent(brain: Brain): void {
     }, HANDSHAKE_TIMEOUT_MS);
   };
 
-  const bumpHandshakeTimeout = (ws: WebSocket): void => {
+  const checkHandshakeWallClock = (ws: WebSocket): boolean => {
+    if (handshaked) return true;
+    if (Date.now() - handshakeStartedAt > HANDSHAKE_MAX_MS) {
+      console.warn("Handshake wall-clock limit — reconnecting.");
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      return false;
+    }
+    return true;
+  };
+
+  const bumpHandshakeTimeout = (ws: WebSocket, extend: boolean): void => {
     if (handshaked) return;
-    armHandshakeTimeout(ws);
+    if (!checkHandshakeWallClock(ws)) return;
+    if (extend) armHandshakeTimeout(ws);
   };
 
   const connect = (): void => {
@@ -248,6 +297,7 @@ export function runAgent(brain: Brain): void {
 
     closeActiveWs();
     handshaked = false;
+    handshakeStartedAt = Date.now();
 
     const ws = new WebSocket(`${arenaUrl}/agent`, {
       headers: { Authorization: `Bearer ${key}` },
@@ -284,6 +334,11 @@ export function runAgent(brain: Brain): void {
         process.exit(1);
       }
       console.error(`Handshake rejected: HTTP ${res.statusCode}`);
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
     });
 
     ws.on("error", (err) => console.error("WS error:", err.message));
@@ -315,20 +370,24 @@ export function runAgent(brain: Brain): void {
         return;
       }
 
-      if (msg.type === "sync" || msg.type === "heartbeat") {
-        bumpHandshakeTimeout(ws);
+      if (msg.type === "sync") {
+        bumpHandshakeTimeout(ws, true);
+        return;
+      }
+      if (msg.type === "heartbeat") {
+        checkHandshakeWallClock(ws);
         return;
       }
 
       if (msg.type === "welcome") {
-        markHandshaked();
+        markHandshaked(ws);
         console.log(`Session ready (${String(msg.you_id ?? "agent")}). ${brain.banner}`);
         return;
       }
 
       if (msg.type === "round_start") {
         if (!handshaked) {
-          bumpHandshakeTimeout(ws);
+          bumpHandshakeTimeout(ws, true);
           return;
         }
         if (msg.rules) rules = msg.rules as Rules;
@@ -337,9 +396,11 @@ export function runAgent(brain: Brain): void {
       }
       if (msg.type === "queued") {
         if (!handshaked) {
-          bumpHandshakeTimeout(ws);
+          bumpHandshakeTimeout(ws, true);
           return;
         }
+        expectState = false;
+        lastStateAt = 0;
         const pos = msg.position != null ? `#${msg.position}` : "pending";
         const total = msg.queued != null ? ` of ${msg.queued}` : "";
         console.log(
@@ -349,15 +410,17 @@ export function runAgent(brain: Brain): void {
       }
       if (msg.type === "dead") {
         if (!handshaked) {
-          bumpHandshakeTimeout(ws);
+          bumpHandshakeTimeout(ws, true);
           return;
         }
+        expectState = false;
+        lastStateAt = 0;
         console.log(`Died at tick ${msg.tick}, peak size ${msg.peak_size}.`);
         return;
       }
       if (msg.type === "round_end") {
         if (!handshaked) {
-          bumpHandshakeTimeout(ws);
+          bumpHandshakeTimeout(ws, true);
           return;
         }
         const top = (msg.standings as { display_name?: string; peak_size?: number }[] | undefined)?.[0];
@@ -385,11 +448,14 @@ export function runAgent(brain: Brain): void {
       }
       if (msg.type !== "state") return;
       if (!handshaked) {
-        bumpHandshakeTimeout(ws);
+        bumpHandshakeTimeout(ws, true);
         return;
       }
 
       const state = msg.state as State;
+      lastStateAt = Date.now();
+      expectState = true;
+      if (Date.now() > state.action_deadline_ms) return;
       // The arena echoes the active rules on every state too; keep ours fresh so a
       // mid-round (re)connect still plays to the correct objective.
       if (msg.rules) rules = msg.rules as Rules;
