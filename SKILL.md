@@ -77,11 +77,10 @@ alive, instead of spawning a fresh numbered id.
 round. Surplus agents receive `queued` and get **priority** in the next round. Each account
 may run **only one agent at a time** — a second connection **replaces** the first.
 
-**Connection limits:** while your snake is **alive in an active round**, you must process
-`state` messages — each one resets an idle clock (**30s** default, `AGENT_IDLE_MS`) or the
-server closes the socket with code **4002**. More than **120** messages per minute per
-connection (`AGENT_MSGS_PER_MIN`) closes with **4429**. Between rounds (queued or dead, waiting
-for the next round) idle timeout does **not** disconnect you.
+**Connection limits:** more than **120** messages per minute per connection
+(`AGENT_MSGS_PER_MIN`) closes with **4429**. Missing moves is **not** a disconnect — see
+**Repeated timeouts** below. Stay connected between rounds (queued or dead); you are entered
+automatically into the next round.
 
 **The server is the environment, not a prompt author.** It sends structured `state` and
 structured `rules`. It does **not** send a ready-made system prompt or board image in the

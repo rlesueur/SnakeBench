@@ -35,8 +35,6 @@ const SPECTATOR_PER_IP = Number(process.env.SPECTATOR_PER_IP) || 8;
 // Per-IP agent-handshake attempts per minute (DoS / brute-force friction).
 const AGENT_HANDSHAKES_PER_MIN = Number(process.env.AGENT_HANDSHAKES_PER_MIN) || 120;
 const SPECTATOR_MAX_FPS = Number(process.env.SPECTATOR_MAX_FPS) || 8;
-const AGENT_IDLE_MS = Number(process.env.AGENT_IDLE_MS) || 30_000;
-// Max inbound agent WS messages per connection per minute (JSON frames, any type).
 const AGENT_MSGS_PER_MIN = Number(process.env.AGENT_MSGS_PER_MIN) || 120;
 // Global cap on distinct agent WebSocket connections (one per account).
 const MAX_AGENT_CONNECTIONS = Number(process.env.MAX_AGENT_CONNECTIONS) || 100;
@@ -566,28 +564,8 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
     lastSentAt: 0,
     send: (msg: unknown) => {
       sendAgent(ws, msg);
-      // A new decision window resets the idle clock — the agent may spend the
-      // full tick ceiling thinking before it submits.
-      if ((msg as { type?: string }).type === "state") resetIdle();
     },
   };
-
-  // Idle-timeout: only drop an agent that goes silent while it has a live snake
-  // in an ongoing round. Agents waiting between rounds (queued mid-round, or
-  // defeated and awaiting the next round) are kept connected so they are
-  // automatically entered into the next round.
-  let idleTimer: NodeJS.Timeout;
-  const resetIdle = () => {
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      if (arena.isAgentLiveInRound(snakeId)) {
-        ws.close(4002, "idle timeout");
-      } else {
-        resetIdle(); // between rounds: re-arm rather than disconnect
-      }
-    }, AGENT_IDLE_MS);
-  };
-  resetIdle();
 
   // Handshake order is fixed: sync → welcome → catch-up (state|queued|dead).
   // Registration waits until welcome so tick traffic cannot arrive first.
@@ -650,7 +628,6 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
       return;
     }
     if (msg.type === "action" && typeof msg.tick === "number" && typeof msg.move === "string") {
-      resetIdle();
       const note = typeof msg.note === "string" ? msg.note : null;
       try {
         arena.submitAction(
@@ -672,7 +649,6 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
 
   ws.on("close", () => {
     clearInterval(pingIv);
-    clearTimeout(idleTimer);
     if (agentWsByAccount.get(accountKey) === ws) {
       agentWsByAccount.delete(accountKey);
       arena.removeAgent(snakeId);
