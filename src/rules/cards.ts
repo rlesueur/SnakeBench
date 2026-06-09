@@ -271,12 +271,10 @@ export function pickRuleCard(seed: string): RuleCard {
 
 /**
  * Laws: 1–2 natural-language rules that change the round's *dynamics* (how a move
- * is interpreted, which moves are legal, what cells mean) rather than its
- * scoreboard. EVERY round now draws at least one law — the dynamics-changer is the
- * point of the benchmark, so no round is left as plain physics — with at most one
- * law per category so a round never stacks two transforms or two constraints.
- * Spatial parameters use the round's board dimensions so they vary every round and
- * can't be hard-coded.
+ * is interpreted or what cells mean) rather than its scoreboard. EVERY round draws
+ * at least one law — the dynamics-changer is the point of the benchmark — with at
+ * most one law per category (transform or semantic). Constraint laws that make a
+ * move fatal (one-way turns, tidal pull, confinement) are not rolled live.
  *
  * The acceptance test for every law: a generic flood-fill + nearest-target
  * program, with no special-casing, must play it *wrongly*. If the only way to
@@ -287,7 +285,9 @@ export function rollLaws(seed: string, width: number, height: number): Law[] {
   // At least one law every round (never plain physics); usually one, sometimes two.
   const count = rng.pick([1, 1, 1, 2, 2]) ?? 1;
   if (count <= 0) return [];
-  const categories: LawCategory[] = ["transform", "constraint", "semantic"];
+  // Constraint laws (no_turn, cadence, confine) are excluded — a single wrong turn
+  // or synchronized tick can wipe most of the field and end the round instantly.
+  const categories: LawCategory[] = ["transform", "semantic"];
   const used = new Set<LawCategory>();
   const chosen: Law[] = [];
   let guard = 0;
@@ -307,11 +307,6 @@ function makeLaw(category: LawCategory, rng: Rng, _width: number, _height: numbe
     return rng.next() < 0.6
       ? LAW_BUILDERS.rotate(rng.pick([1, 2, 3] as const)!)
       : LAW_BUILDERS.mirror(rng.pick(["horizontal", "vertical"] as const)!);
-  }
-  if (category === "constraint") {
-    // no_turn only — cadence (tidal pull) and confine can wipe many snakes on the
-    // same tick when the constraint fires, ending rounds instantly.
-    return LAW_BUILDERS.noTurn(rng.pick(["left", "right"] as const)!);
   }
   return LAW_BUILDERS.inversion(6);
 }

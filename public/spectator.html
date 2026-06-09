@@ -63,11 +63,89 @@
         padding: 12px 12px 8px;
         color: #eaf4fb;
         box-shadow: 0 10px 40px rgba(10, 30, 50, 0.35);
-        overflow: hidden auto;
       }
-      #ruleCard { flex: 0 0 auto; padding-bottom: 10px; }
+      .card-panel {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+      }
+      #ruleCard { flex: 0 0 auto; padding-bottom: 10px; overflow: hidden auto; }
       #lbCard { flex: 1 1 auto; min-height: 120px; }
-      #statsCard { flex: 0 0 auto; max-height: 38%; }
+      #statsCard { flex: 0 1 auto; max-height: 38%; min-height: 100px; }
+      .panel-scroll {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+        margin: 0 -4px;
+        padding: 0 4px 2px;
+      }
+      .card h2 .expbtn {
+        margin-left: 8px;
+        background: rgba(95, 178, 255, 0.14);
+        border: 1px solid rgba(95, 178, 255, 0.3);
+        color: #9fc6dc;
+        border-radius: 6px;
+        width: 24px;
+        height: 20px;
+        cursor: pointer;
+        font-size: 13px;
+        line-height: 1;
+        padding: 0;
+        flex: none;
+      }
+      .card h2 .expbtn:hover { background: rgba(95, 178, 255, 0.28); color: #eaf4fb; }
+
+      /* Expanded leaderboard / all-time view for smaller screens. */
+      #boardExpand {
+        position: fixed; inset: 0; z-index: 25;
+        display: flex; align-items: center; justify-content: center;
+        padding: 16px;
+        background: rgba(4, 12, 20, 0.72);
+        backdrop-filter: blur(6px);
+      }
+      #boardExpand.hidden { display: none; }
+      .board-expand-panel {
+        width: min(520px, 100%);
+        max-height: min(88vh, 720px);
+        display: flex;
+        flex-direction: column;
+        background: rgba(11, 30, 44, 0.96);
+        border: 1px solid rgba(120, 180, 220, 0.28);
+        border-radius: 16px;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+        overflow: hidden;
+      }
+      .board-expand-head {
+        display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        padding: 14px 16px 10px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .board-expand-head h2 {
+        margin: 0; font-size: 13px; letter-spacing: .6px;
+        text-transform: uppercase; color: #9fc6dc;
+      }
+      .board-expand-head .sub { font-size: 11px; color: #6f97ae; font-weight: 600; margin-left: 8px; text-transform: none; letter-spacing: 0; }
+      .board-expand-close {
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: #cfe6f4;
+        border-radius: 8px;
+        width: 32px; height: 28px;
+        cursor: pointer; font-size: 18px; line-height: 1;
+      }
+      .board-expand-close:hover { border-color: rgba(95, 208, 255, 0.5); }
+      .board-expand-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+        padding: 8px 12px 14px;
+      }
 
       /* Active rule card */
       .ruleName { font-size: 16px; font-weight: 800; color: #ffd54a; margin: 0 6px 5px; letter-spacing: .2px; }
@@ -83,8 +161,9 @@
       .card h2 {
         margin: 2px 6px 10px; font-size: 12px; letter-spacing: .6px;
         text-transform: uppercase; color: #9fc6dc;
-        display: flex; justify-content: space-between; align-items: baseline;
+        display: flex; justify-content: flex-start; align-items: center; flex-wrap: wrap; gap: 4px;
       }
+      .card h2 .hint { margin-right: auto; }
       .card h2 .hint { font-weight: 600; color: #6f97ae; text-transform: none; letter-spacing: 0; font-size: 10px; }
 
       .strow {
@@ -286,15 +365,25 @@
         <div id="ruleBrief" class="ruleBrief"></div>
         <div id="rulePills" class="pills"></div>
       </div>
-      <div id="lbCard" class="card">
-        <h2>This round <span id="lbMetric" class="hint">click to follow</span></h2>
-        <div id="leaderboard"></div>
-        <div id="lbPager" class="lbpager"></div>
+      <div id="lbCard" class="card card-panel">
+        <h2>This round <span id="lbMetric" class="hint">click to follow</span>
+          <button type="button" class="expbtn" id="lbExpandBtn" title="Expand round leaderboard">⤢</button></h2>
+        <div id="leaderboard" class="panel-scroll"></div>
       </div>
-      <div id="statsCard" class="card">
-        <h2>All-time <span class="hint">skill rating · decision quality</span></h2>
-        <div id="stats"></div>
-        <div id="statsPager" class="lbpager"></div>
+      <div id="statsCard" class="card card-panel">
+        <h2>All-time <span class="hint">skill rating · decision quality</span>
+          <button type="button" class="expbtn" id="statsExpandBtn" title="Expand all-time leaderboard">⤢</button></h2>
+        <div id="stats" class="panel-scroll"></div>
+      </div>
+    </div>
+
+    <div id="boardExpand" class="hidden" role="dialog" aria-modal="true" aria-labelledby="boardExpandTitle">
+      <div class="board-expand-panel">
+        <div class="board-expand-head">
+          <h2><span id="boardExpandTitle">Leaderboard</span><span id="boardExpandSub" class="sub"></span></h2>
+          <button type="button" class="board-expand-close" id="boardExpandClose" title="Close (Esc)">×</button>
+        </div>
+        <div class="board-expand-body" id="boardExpandBody"></div>
       </div>
     </div>
 
@@ -332,9 +421,14 @@
         tick: document.getElementById("tick"),
         alive: document.getElementById("alive"),
         lb: document.getElementById("leaderboard"),
-        lbPager: document.getElementById("lbPager"),
         stats: document.getElementById("stats"),
-        statsPager: document.getElementById("statsPager"),
+        lbExpandBtn: document.getElementById("lbExpandBtn"),
+        statsExpandBtn: document.getElementById("statsExpandBtn"),
+        boardExpand: document.getElementById("boardExpand"),
+        boardExpandTitle: document.getElementById("boardExpandTitle"),
+        boardExpandSub: document.getElementById("boardExpandSub"),
+        boardExpandBody: document.getElementById("boardExpandBody"),
+        boardExpandClose: document.getElementById("boardExpandClose"),
         accountLink: document.getElementById("accountLink"),
         accountLabel: document.getElementById("accountLabel"),
         status: document.getElementById("status"),
@@ -1002,29 +1096,58 @@
         else if (e.key === "c" || e.key === "C") setMode("full");
         else if (e.key === "+" || e.key === "=") zoomAt(W / 2, H / 2, 1.25);
         else if (e.key === "-" || e.key === "_") zoomAt(W / 2, H / 2, 1 / 1.25);
-        else if (e.key === "Escape") setMode("full");
+        else if (e.key === "Escape") {
+          if (!els.boardExpand.classList.contains("hidden")) closeBoardExpand();
+          else setMode("full");
+        }
       });
 
-      // --- leaderboard (paged) ---
-      let lbPage = 0;
-      const LB_PAGE = 10;
+      function closeBoardExpand() {
+        els.boardExpand.classList.add("hidden");
+        els.boardExpandBody.innerHTML = "";
+      }
 
-      function renderLeaderboard() {
-        if (!cur) return;
-        const snakes = cur.snakes;
-        const obj = (currentRules && currentRules.objective) || "survive";
-        const METRIC = {
-          survive: "length", grow: "peak length", kills: "kills",
-          zone: "zone ticks", relay: "waypoints", bell: "length", fasting: "length (smallest wins)",
-        };
-        const metricEl = document.getElementById("lbMetric");
-        if (metricEl) metricEl.textContent = "by " + (METRIC[obj] || "length");
-        // The number shown per snake is its standing on the round's win condition.
-        // The server computes this into `score`; plain survival has none, so fall
-        // back to current length there.
-        const val = (s) => (s.score != null ? s.score : s.size);
+      function openBoardExpand(kind) {
+        if (kind === "round") {
+          if (!cur) return;
+          const sorted = sortedRoundSnakes();
+          els.boardExpandTitle.textContent = "This round";
+          els.boardExpandSub.textContent = document.getElementById("lbMetric")?.textContent || "";
+          els.boardExpandBody.innerHTML = "";
+          sorted.forEach((s, i) => {
+            els.boardExpandBody.appendChild(buildLbRow(s, i + 1));
+          });
+        } else {
+          const board = lastBoard;
+          if (!board || !board.length) return;
+          els.boardExpandTitle.textContent = "All-time";
+          els.boardExpandSub.textContent = "skill rating · decision quality";
+          els.boardExpandBody.innerHTML = buildStatsHtml(board, 0, board.length);
+        }
+        els.boardExpand.classList.remove("hidden");
+      }
+
+      els.lbExpandBtn.onclick = () => openBoardExpand("round");
+      els.statsExpandBtn.onclick = () => openBoardExpand("stats");
+      els.boardExpandClose.onclick = closeBoardExpand;
+      els.boardExpand.onclick = (e) => {
+        if (e.target === els.boardExpand) closeBoardExpand();
+      };
+
+      // --- leaderboard (scrollable) ---
+      function roundObjective() {
+        return (currentRules && currentRules.objective) || "survive";
+      }
+
+      function roundVal(s) {
+        return s.score != null ? s.score : s.size;
+      }
+
+      function sortedRoundSnakes() {
+        if (!cur) return [];
+        const obj = roundObjective();
+        const val = roundVal;
         const aliveFirst = (a, b) => (b.alive ? 1 : 0) - (a.alive ? 1 : 0);
-        // Mirror the arena's end-of-round ranking so the live board previews the result.
         const cmp = (a, b) => {
           switch (obj) {
             case "grow": return b.peakSize - a.peakSize || aliveFirst(a, b);
@@ -1033,56 +1156,47 @@
             case "relay": return val(b) - val(a) || aliveFirst(a, b) || b.peakSize - a.peakSize;
             case "bell": return aliveFirst(a, b) || b.size - a.size;
             case "fasting": return aliveFirst(a, b) || a.size - b.size;
-            default: return aliveFirst(a, b) || b.peakSize - a.peakSize; // survive
+            default: return aliveFirst(a, b) || b.peakSize - a.peakSize;
           }
         };
-        const sorted = [...snakes].sort(cmp);
-        els.alive.textContent = snakes.filter((s) => s.alive).length;
-
-        const pages = Math.max(1, Math.ceil(sorted.length / LB_PAGE));
-        lbPage = Math.min(Math.max(lbPage, 0), pages - 1);
-        const start = lbPage * LB_PAGE;
-        const pageRows = sorted.slice(start, start + LB_PAGE);
-
-        els.lb.innerHTML = "";
-        pageRows.forEach((s, i) => {
-          const rank = start + i + 1;
-          const row = document.createElement("div");
-          row.className = "lbrow" + (s.id === follow ? " followed" : "") + (s.alive ? "" : " dead");
-          row.innerHTML =
-            `<span class="rk">${rank}</span>` +
-            `<span class="sw" style="background:${bodyCol(s.id)};color:${bodyCol(s.id)}"></span>` +
-            `<span class="nm">${escapeHtml(s.displayName)}</span>` +
-            (s.isNpc ? "" : `<span class="ai">AI</span>`) +
-            `<span class="sz">${val(s)}</span>`;
-          row.onclick = () => setFollow(s.id);
-          els.lb.appendChild(row);
-        });
-
-        if (sorted.length > LB_PAGE) {
-          const from = start + 1;
-          const to = Math.min(start + LB_PAGE, sorted.length);
-          els.lbPager.style.display = "flex";
-          els.lbPager.innerHTML =
-            `<button class="pgbtn" id="lbPrev"${lbPage === 0 ? " disabled" : ""}>‹</button>` +
-            `<span class="pginfo">${from}–${to} of ${sorted.length}</span>` +
-            `<button class="pgbtn" id="lbNext"${lbPage >= pages - 1 ? " disabled" : ""}>›</button>`;
-          els.lbPager.querySelector("#lbPrev").onclick = () => {
-            lbPage -= 1;
-            renderLeaderboard();
-          };
-          els.lbPager.querySelector("#lbNext").onclick = () => {
-            lbPage += 1;
-            renderLeaderboard();
-          };
-        } else {
-          els.lbPager.style.display = "none";
-          els.lbPager.innerHTML = "";
-        }
+        return [...cur.snakes].sort(cmp);
       }
 
-      let stPage = 0;
-      const ST_PAGE = 10;
+      function buildLbRow(s, rank) {
+        const row = document.createElement("div");
+        row.className = "lbrow" + (s.id === follow ? " followed" : "") + (s.alive ? "" : " dead");
+        row.innerHTML =
+          `<span class="rk">${rank}</span>` +
+          `<span class="sw" style="background:${bodyCol(s.id)};color:${bodyCol(s.id)}"></span>` +
+          `<span class="nm">${escapeHtml(s.displayName)}</span>` +
+          (s.isNpc ? "" : `<span class="ai">AI</span>`) +
+          `<span class="sz">${roundVal(s)}</span>`;
+        row.onclick = () => {
+          setFollow(s.id);
+          closeBoardExpand();
+        };
+        return row;
+      }
+
+      function renderLeaderboard() {
+        if (!cur) return;
+        const obj = roundObjective();
+        const METRIC = {
+          survive: "length", grow: "peak length", kills: "kills",
+          zone: "zone ticks", relay: "waypoints", bell: "length", fasting: "length (smallest wins)",
+        };
+        const metricEl = document.getElementById("lbMetric");
+        if (metricEl) metricEl.textContent = "by " + (METRIC[obj] || "length");
+
+        const sorted = sortedRoundSnakes();
+        els.alive.textContent = cur.snakes.filter((s) => s.alive).length;
+
+        els.lb.innerHTML = "";
+        sorted.forEach((s, i) => {
+          els.lb.appendChild(buildLbRow(s, i + 1));
+        });
+      }
+
       let lastBoard = null;
       let lastDeltas = {}; // account -> conservative-rating change from the last round
 
@@ -1092,22 +1206,8 @@
         for (const d of deltas) lastDeltas[d.account] = d.delta;
       }
 
-      function renderStats(board) {
-        if (board) lastBoard = board;
-        board = lastBoard;
-        if (!board) return;
-        if (!board.length) {
-          els.stats.innerHTML = `<div class="strow" style="color:#6f97ae">No games recorded yet.</div>`;
-          els.statsPager.style.display = "none";
-          els.statsPager.innerHTML = "";
-          return;
-        }
-
-        const pages = Math.max(1, Math.ceil(board.length / ST_PAGE));
-        stPage = Math.min(Math.max(stPage, 0), pages - 1);
-        const start = stPage * ST_PAGE;
-        const pageRows = board.slice(start, start + ST_PAGE);
-
+      function buildStatsHtml(board, start, end) {
+        const pageRows = board.slice(start, end);
         let html = `<div class="strow head"><span class="rk">#</span><span class="nm">account</span><span class="v">rating</span><span class="dlt">±</span><span class="v">quality</span><span class="v">win%</span></div>`;
         pageRows.forEach((s, i) => {
           const rating = Math.round(s.conservativeRating ?? 0);
@@ -1127,28 +1227,18 @@
             `<span class="v">${winPct}</span>` +
             `</div>`;
         });
-        els.stats.innerHTML = html;
+        return html;
+      }
 
-        if (board.length > ST_PAGE) {
-          const from = start + 1;
-          const to = Math.min(start + ST_PAGE, board.length);
-          els.statsPager.style.display = "flex";
-          els.statsPager.innerHTML =
-            `<button class="pgbtn" id="stPrev"${stPage === 0 ? " disabled" : ""}>‹</button>` +
-            `<span class="pginfo">${from}–${to} of ${board.length}</span>` +
-            `<button class="pgbtn" id="stNext"${stPage >= pages - 1 ? " disabled" : ""}>›</button>`;
-          els.statsPager.querySelector("#stPrev").onclick = () => {
-            stPage -= 1;
-            renderStats();
-          };
-          els.statsPager.querySelector("#stNext").onclick = () => {
-            stPage += 1;
-            renderStats();
-          };
-        } else {
-          els.statsPager.style.display = "none";
-          els.statsPager.innerHTML = "";
+      function renderStats(board) {
+        if (board) lastBoard = board;
+        board = lastBoard;
+        if (!board) return;
+        if (!board.length) {
+          els.stats.innerHTML = `<div class="strow" style="color:#6f97ae">No games recorded yet.</div>`;
+          return;
         }
+        els.stats.innerHTML = buildStatsHtml(board, 0, board.length);
       }
 
       function escapeHtml(s) {

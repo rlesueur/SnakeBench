@@ -236,11 +236,13 @@ describe("rollLaws", () => {
     }
   });
 
-  it("never rolls cadence (tidal pull) or confine", () => {
+  it("never rolls constraint laws (one-way turns, tidal pull, confinement)", () => {
     for (let i = 0; i < 500; i++) {
-      for (const law of rollLaws(`no-tide-${i}`, 80, 80)) {
+      for (const law of rollLaws(`no-constraint-${i}`, 80, 80)) {
+        expect(law.category).not.toBe("constraint");
         expect(law.kind).not.toBe("cadence");
         expect(law.kind).not.toBe("confine");
+        expect(law.kind).not.toBe("no_turn");
       }
     }
   });
