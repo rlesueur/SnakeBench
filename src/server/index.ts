@@ -440,8 +440,6 @@ const WS_MAX_PAYLOAD = 64 * 1024;
 const agentWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
 const spectatorWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
 
-let agentCounter = 0;
-
 // One live agent connection per account. We track the current socket per account
 // so a new connection can REPLACE an existing one (newest wins): this enforces
 // "one bot per account" while letting a restarted agent take over cleanly instead
@@ -449,6 +447,13 @@ let agentCounter = 0;
 const agentWsByAccount = new Map<string, WebSocket>();
 const accountKeyOf = (identity: Identity): string =>
   identity.userId ? `user:${identity.userId}` : `static:${identity.displayName}`;
+
+/** Stable snake id for an account — same across reconnects so a dropped agent can
+ * resume control of its live snake instead of spawning a new numbered identity. */
+function snakeIdForAccount(accountKey: string): string {
+  if (accountKey.startsWith("user:")) return `agent_u_${accountKey.slice(5)}`;
+  return `agent_${accountKey.slice("static:".length)}`;
+}
 
 httpServer.on("upgrade", async (req, socket, head) => {
   const url = new URL(req.url ?? "/", "http://localhost");
@@ -507,9 +512,17 @@ httpServer.on("upgrade", async (req, socket, head) => {
   }
 });
 
+function sendAgent(ws: WebSocket, msg: unknown): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify(msg));
+  } catch (err) {
+    console.warn("agent send failed:", (err as Error).message);
+  }
+}
+
 agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: string) => {
-  agentCounter += 1;
-  const snakeId = `agent_${displayName}_${agentCounter}`;
+  const snakeId = snakeIdForAccount(accountKey);
   const session = {
     snakeId,
     displayName,
@@ -519,7 +532,7 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
     lastViewTick: -1,
     lastSentAt: 0,
     send: (msg: unknown) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      sendAgent(ws, msg);
       // A new decision window resets the idle clock — the agent may spend the
       // full tick ceiling thinking before it submits.
       if ((msg as { type?: string }).type === "state") resetIdle();
@@ -543,14 +556,24 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
   };
   resetIdle();
 
-  session.send({
-    type: "welcome",
-    you_id: snakeId,
-    config,
-    docs: { skill: "/api/skill", guide: "/api/guide", human: "/guide.html" },
-  });
+  // Lightweight ack first so the client knows the socket is live before we
+  // serialise the (possibly large) welcome payload.
+  sendAgent(ws, { type: "sync" });
   arena.addAgent(session);
-  console.log(`Agent connected: ${snakeId}`);
+  console.log(`Agent connected: ${displayName} (${snakeId})`);
+  setImmediate(() => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    session.send({
+      type: "welcome",
+      you_id: snakeId,
+      config,
+      docs: { skill: "/api/skill", guide: "/api/guide", human: "/guide.html" },
+    });
+  });
+
+  const pingIv = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) ws.ping();
+  }, 25_000);
 
   let msgCount = 0;
   let msgWindowReset = Date.now() + 60_000;
@@ -596,12 +619,13 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
   });
 
   ws.on("close", () => {
+    clearInterval(pingIv);
     clearTimeout(idleTimer);
     arena.removeAgent(snakeId);
     // Only clear the account slot if it still points at THIS socket (a newer
     // connection may have already replaced us).
     if (agentWsByAccount.get(accountKey) === ws) agentWsByAccount.delete(accountKey);
-    console.log(`Agent disconnected: ${snakeId}`);
+    console.log(`Agent disconnected: ${displayName} (${snakeId})`);
   });
 });
 

@@ -110,47 +110,214 @@ export interface Brain {
   decide(obs: Observation): Decision | Promise<Decision>;
 }
 
+const MIN_BACKOFF_MS = 1000;
+const MAX_BACKOFF_MS = 30_000;
+const CONNECT_DEBOUNCE_MS = 500;
+const OPEN_TIMEOUT_MS = 25_000;
+const HANDSHAKE_TIMEOUT_MS = 20_000;
+
+function arenaHttpOrigin(arenaUrl: string): string {
+  const wsBase = arenaUrl.replace(/\/$/, "");
+  const httpBase = wsBase.replace(/^wss:/i, "https:").replace(/^ws:/i, "http:");
+  const u = new URL(httpBase.includes("://") ? httpBase : `http://${httpBase}`);
+  return `${u.protocol}//${u.host}`;
+}
+
+/** Wake a cold-hosted arena before opening the WebSocket (best effort). */
+async function wakeArena(arenaUrl: string): Promise<void> {
+  const origin = arenaHttpOrigin(arenaUrl);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      const res = await fetch(`${origin}/healthz`, { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (res.ok) return;
+    } catch {
+      /* server may still be waking */
+    }
+    if (attempt < 5) await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+  }
+}
+
+function sendJson(ws: WebSocket, payload: unknown): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify(payload));
+  } catch (err) {
+    console.error("send failed:", (err as Error).message);
+  }
+}
+
 /** Connect to the arena and play with the given brain, reconnecting on drop. */
 export function runAgent(brain: Brain): void {
   const key = process.argv[2] ?? process.env.AGENT_KEY ?? "local-dev-key";
   const arenaUrl = process.argv[3] ?? process.env.ARENA_URL ?? "ws://localhost:8080";
 
-  // Auto-reconnect with exponential backoff so a transient drop doesn't remove
-  // the agent from the benchmark. A 401 (bad key) is fatal — no point retrying.
-  const MIN_BACKOFF = 1000;
-  const MAX_BACKOFF = 30_000;
-  let backoff = MIN_BACKOFF;
+  let backoff = MIN_BACKOFF_MS;
+  let activeWs: WebSocket | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let openTimer: ReturnType<typeof setTimeout> | null = null;
+  let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+  let synced = false;
+  let lastConnectAt = 0;
+  let fatalAuth = false;
+
+  const clearReconnectTimer = (): void => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  };
+
+  const clearConnectTimers = (): void => {
+    if (openTimer) {
+      clearTimeout(openTimer);
+      openTimer = null;
+    }
+    if (handshakeTimer) {
+      clearTimeout(handshakeTimer);
+      handshakeTimer = null;
+    }
+  };
+
+  const detachWs = (ws: WebSocket): void => {
+    ws.removeAllListeners();
+  };
+
+  const closeActiveWs = (): void => {
+    clearConnectTimers();
+    if (!activeWs) return;
+    const ws = activeWs;
+    activeWs = null;
+    detachWs(ws);
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  const scheduleReconnect = (delayMs: number): void => {
+    if (fatalAuth) return;
+    clearReconnectTimer();
+    reconnectTimer = setTimeout(() => void boot(), delayMs);
+  };
+
+  const markSynced = (): void => {
+    if (synced) return;
+    synced = true;
+    backoff = MIN_BACKOFF_MS;
+    if (handshakeTimer) {
+      clearTimeout(handshakeTimer);
+      handshakeTimer = null;
+    }
+  };
+
+  const armHandshakeTimeout = (ws: WebSocket): void => {
+    if (handshakeTimer) clearTimeout(handshakeTimer);
+    handshakeTimer = setTimeout(() => {
+      if (ws !== activeWs || synced) return;
+      console.warn("Timed out waiting for server handshake — reconnecting.");
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }, HANDSHAKE_TIMEOUT_MS);
+  };
 
   const connect = (): void => {
+    if (fatalAuth) return;
+    if (activeWs?.readyState === WebSocket.CONNECTING) return;
+    if (activeWs?.readyState === WebSocket.OPEN && (synced || handshakeTimer)) return;
+
+    const now = Date.now();
+    if (now - lastConnectAt < CONNECT_DEBOUNCE_MS) {
+      scheduleReconnect(CONNECT_DEBOUNCE_MS - (now - lastConnectAt));
+      return;
+    }
+    lastConnectAt = now;
+
+    closeActiveWs();
+    synced = false;
+
     const ws = new WebSocket(`${arenaUrl}/agent`, {
       headers: { Authorization: `Bearer ${key}` },
     });
+    activeWs = ws;
 
     let inFlight: AbortController | null = null;
     let rules: Rules | null = null;
 
+    openTimer = setTimeout(() => {
+      if (ws !== activeWs || ws.readyState !== WebSocket.CONNECTING) return;
+      console.warn("WebSocket open timed out — reconnecting.");
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }, OPEN_TIMEOUT_MS);
+
     ws.on("open", () => {
-      backoff = MIN_BACKOFF;
+      if (ws !== activeWs) return;
+      if (openTimer) {
+        clearTimeout(openTimer);
+        openTimer = null;
+      }
+      armHandshakeTimeout(ws);
       console.log(`Connected to ${arenaUrl}; ${brain.banner}`);
     });
+
     ws.on("unexpected-response", (_req, res) => {
       if (res.statusCode === 401) {
+        fatalAuth = true;
         console.error("Authentication failed (401) — check your AGENT_KEY. Not retrying.");
         process.exit(1);
       }
       console.error(`Handshake rejected: HTTP ${res.statusCode}`);
     });
+
     ws.on("error", (err) => console.error("WS error:", err.message));
+
     ws.on("close", (code) => {
+      if (ws !== activeWs) return;
+      activeWs = null;
+      clearConnectTimers();
       inFlight?.abort();
-      const delay = backoff;
-      backoff = Math.min(backoff * 2, MAX_BACKOFF);
+      if (fatalAuth) return;
+
+      let delay = backoff;
+      if (code === 4005) {
+        delay = MIN_BACKOFF_MS;
+      } else {
+        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+      }
       console.log(`Disconnected (code ${code}). Reconnecting in ${Math.round(delay / 1000)}s…`);
-      setTimeout(connect, delay);
+      scheduleReconnect(delay);
     });
 
     ws.on("message", async (raw) => {
-      const msg = JSON.parse(raw.toString());
+      if (ws !== activeWs) return;
+      let msg: { type?: string; [key: string]: unknown };
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+
+      if (
+        msg.type === "sync" ||
+        msg.type === "welcome" ||
+        msg.type === "round_start" ||
+        msg.type === "state"
+      ) {
+        markSynced();
+      }
+
       if (msg.type === "welcome") {
         return;
       }
@@ -164,13 +331,25 @@ export function runAgent(brain: Brain): void {
         return;
       }
       if (msg.type === "round_end") {
-        const top = msg.standings[0];
+        const top = (msg.standings as { display_name?: string; peak_size?: number }[] | undefined)?.[0];
         let line = `Round ${msg.round} ended. Winner: ${top?.display_name} (peak ${top?.peak_size}).`;
-        if (msg.your) {
-          const y = msg.your;
-          const d = y.rating_delta > 0 ? `+${y.rating_delta}` : `${y.rating_delta}`;
+        const y = msg.your as
+          | {
+              rank?: number;
+              field_size?: number;
+              decision_quality?: number;
+              rating?: number;
+              rating_delta?: number;
+              intent_rate?: number;
+              intent_coherent_rate?: number;
+            }
+          | undefined;
+        if (y) {
+          const d = (y.rating_delta ?? 0) > 0 ? `+${y.rating_delta}` : `${y.rating_delta ?? 0}`;
           line += ` You: #${y.rank}/${y.field_size}, quality ${y.decision_quality}, rating ${Math.round(y.rating ?? 0)} (${d}).`;
-          if (y.intent_rate != null) line += ` Intent ${y.intent_rate}% declared, ${y.intent_coherent_rate}% coherent.`;
+          if (y.intent_rate != null) {
+            line += ` Intent ${y.intent_rate}% declared, ${y.intent_coherent_rate}% coherent.`;
+          }
         }
         console.log(line);
         return;
@@ -194,24 +373,22 @@ export function runAgent(brain: Brain): void {
         const decision = await brain.decide({ state, rules, signal: ac.signal });
         clearTimeout(timer);
         const move = decision.move;
-        if (move && ws.readyState === WebSocket.OPEN) {
+        if (move && ws === activeWs && ws.readyState === WebSocket.OPEN) {
           const latencyMs = Date.now() - started;
-          ws.send(
-            JSON.stringify({
-              type: "action",
-              tick: state.tick,
-              move,
+          sendJson(ws, {
+            type: "action",
+            tick: state.tick,
+            move,
+            intent: decision.intent,
+            target: decision.target,
+            log: {
+              model: brain.name,
+              latencyMs,
               intent: decision.intent,
               target: decision.target,
-              log: {
-                model: brain.name,
-                latencyMs,
-                intent: decision.intent,
-                target: decision.target,
-                ...decision.log,
-              },
-            }),
-          );
+              ...decision.log,
+            },
+          });
           console.log(
             `tick ${state.tick}: ${move}/${decision.intent ?? "—"} (${latencyMs}ms, len ${state.you.length})`,
           );
@@ -223,5 +400,11 @@ export function runAgent(brain: Brain): void {
     });
   };
 
-  connect();
+  const boot = async (): Promise<void> => {
+    reconnectTimer = null;
+    await wakeArena(arenaUrl);
+    connect();
+  };
+
+  void boot();
 }
