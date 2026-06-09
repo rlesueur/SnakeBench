@@ -1263,23 +1263,75 @@ export class Arena {
     };
   }
 
-  private sendStateToAgents(): void {
-    if (!this.game) return;
+  private sendStateToAgent(session: AgentSession): void {
+    if (!this.game || !this.roundActive) return;
+    const snake = this.game.snakeById(session.snakeId);
+    if (!snake || !snake.alive) return;
     const deadline = Date.now() + this.game.config.tickDeadlineMs;
     const rules = this.rulesPayload();
+    const view = buildAgentView(this.game, session.snakeId, deadline, session.recentMoves ?? []);
+    session.lastView = view;
+    session.lastViewTick = this.game.tick;
+    session.lastSentAt = Date.now();
+    session.send({ type: "state", state: view, rules });
+  }
+
+  private sendStateToAgents(): void {
+    if (!this.game) return;
     for (const session of this.agents.values()) {
-      const snake = this.game.snakeById(session.snakeId);
-      if (!snake || !snake.alive) continue;
-      const view = buildAgentView(this.game, session.snakeId, deadline, session.recentMoves ?? []);
-      session.lastView = view;
-      session.lastViewTick = this.game.tick;
-      session.lastSentAt = Date.now();
-      // The server is the environment: it sends the INFORMATION to play — the
-      // structured vision-scoped `state` and the structured `rules` (objective +
-      // laws). It does NOT prompt: turning this into a model prompt is the agent
-      // harness's job.
-      session.send({ type: "state", state: view, rules });
+      this.sendStateToAgent(session);
     }
+  }
+
+  /** Push the current session status immediately after connect/reconnect so agents
+   * do not sit idle until the next tick boundary (especially mid-deliberation). */
+  catchUpAgent(session: AgentSession): void {
+    if (!this.game || !this.roundActive) return;
+
+    const snake = this.game.snakeById(session.snakeId);
+    const inRound = this.roundAccounts.has(session.snakeId);
+
+    if (inRound && snake?.alive) {
+      this.sendStateToAgent(session);
+      return;
+    }
+
+    if (inRound && snake && !snake.alive) {
+      session.alive = false;
+      session.send({ type: "dead", tick: this.game.tick, peak_size: snake.peakSize });
+      return;
+    }
+
+    const cap = Math.max(1, this.serverConfig.maxAgentsPerRound);
+    const all = [...this.agents.values()];
+    const prioritised = [
+      ...all.filter((s) => this.queuedLastRound.has(s.snakeId)),
+      ...all.filter((s) => !this.queuedLastRound.has(s.snakeId)),
+    ];
+    const queued = prioritised.slice(cap);
+    const qIdx = queued.findIndex((s) => s.snakeId === session.snakeId);
+
+    session.alive = false;
+    if (qIdx >= 0) {
+      session.send({
+        type: "queued",
+        round: this.round,
+        position: qIdx + 1,
+        queued: queued.length,
+        cap,
+        reason: "round_full",
+      });
+      return;
+    }
+
+    session.send({
+      type: "queued",
+      round: this.round,
+      position: null,
+      queued: null,
+      cap,
+      reason: "round_in_progress",
+    });
   }
 
   private endRound(reason: string): void {

@@ -1533,7 +1533,7 @@
       let openTimer = null;
       let synced = false;
       let everSynced = false;
-      const INIT_TIMEOUT_MS = 20_000;
+      const INIT_TIMEOUT_MS = 45_000;
       const OPEN_TIMEOUT_MS = 25_000;
       const RETRY_BASE_MS = 1000;
       const RETRY_MAX_MS = 30_000;
@@ -1615,6 +1615,13 @@
           return;
         }
         void reconnectSpectator(300);
+      }
+
+      /** Extend the init deadline while the server is still catching us up. */
+      function bumpInitTimeout() {
+        const ws = activeWs;
+        if (!ws || synced || ws.readyState !== WebSocket.OPEN) return;
+        armInitTimeout(ws);
       }
 
       /** Start the init deadline only once the WebSocket is actually open. */
@@ -1732,29 +1739,41 @@
 
       function handleSpectatorMsg(msg) {
         touchWs();
-        if (msg.type === "heartbeat") return;
-        // Any live feed message proves the socket is working — do not wait only
-        // for `init` (it can race with onopen on some browsers).
-        if (msg.type !== "init" && (msg.type === "sync" || msg.type === "leaderboard" ||
-            msg.type === "frame" || msg.type === "round_start" || msg.type === "deliberation")) {
-          if (!synced && msg.type === "sync") {
-            if (!everSynced) {
-              els.connTitle.textContent = "Connected — loading game…";
-              els.connDetail.textContent = "Receiving the current board…";
-            }
-            setConnChip("wait", "Loading…");
-          } else if (!synced) {
-            markSynced();
-            els.connOverlay.classList.add("hidden");
-            setConnChip("live", "Live");
-          }
+        if (msg.type === "heartbeat") {
+          if (!synced) bumpInitTimeout();
+          return;
+        }
+        // Only `init` completes the handshake — other messages may arrive while
+        // a large board snapshot is still serialising; extend the deadline but
+        // do not hide the overlay until we have a full catch-up payload.
+        if (!synced && msg.type === "sync") {
+          bumpInitTimeout();
+          els.connTitle.textContent = everSynced
+            ? "Reconnecting — loading game…"
+            : "Connected — loading game…";
+          els.connDetail.textContent = "Receiving the current board…";
+          setConnChip("wait", "Loading…");
+        } else if (!synced && msg.type !== "init") {
+          bumpInitTimeout();
         }
         if (msg.type === "init") {
           applyInit(msg);
         } else if (msg.type === "round_start") {
           awaitingRound = false;
           lastBellWarnKey = "";
-          if (!synced) applyInit({ waiting: false, intermission: false, round: msg.round, world: msg.world, obstacles: msg.obstacles, frame: null, rules: msg.rules, deliberation: null, next_round_in_ms: null });
+          if (!synced) {
+            applyInit({
+              waiting: false,
+              intermission: false,
+              round: msg.round,
+              world: msg.world,
+              obstacles: msg.obstacles,
+              frame: null,
+              rules: msg.rules,
+              deliberation: null,
+              next_round_in_ms: null,
+            });
+          }
           clearCountdown();
           think = null;
           sayState.clear();
@@ -1763,11 +1782,19 @@
           setWorld(msg.world);
           renderRules(msg.rules);
           els.round.textContent = msg.round;
-          showIntermission(`Round ${msg.round}`, "Dealing the board…");
-          setConnChip("live", `Round ${msg.round} starting…`);
+          if (!cur) {
+            showIntermission(`Round ${msg.round}`, "Dealing the board…");
+            setConnChip("live", `Round ${msg.round} starting…`);
+          } else {
+            hideIntermission();
+            setConnState("live");
+          }
         } else if (msg.type === "frame") {
           awaitingRound = false;
-          if (!synced) applyInit({ waiting: false, intermission: false, round: msg.frame?.round, world: cur?.world || world, obstacles, frame: msg.frame, rules: currentRules, deliberation: null, next_round_in_ms: null });
+          if (!synced) {
+            bumpInitTimeout();
+            return;
+          }
           hideIntermission();
           clearCountdown();
           setConnState("live");
@@ -1880,10 +1907,10 @@
           clearOpenTimer();
           touchWs();
           armInitTimeout(ws);
-          if (!everSynced) {
-            els.connTitle.textContent = "Connected — loading game…";
-            els.connDetail.textContent = "Waiting for the current round state from the server.";
-          }
+          els.connTitle.textContent = everSynced
+            ? "Reconnecting — loading game…"
+            : "Connected — loading game…";
+          els.connDetail.textContent = "Waiting for the current round state from the server.";
           setConnChip("wait", "Loading…");
         };
         ws.onerror = () => {

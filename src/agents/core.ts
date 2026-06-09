@@ -114,7 +114,7 @@ const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
 const CONNECT_DEBOUNCE_MS = 500;
 const OPEN_TIMEOUT_MS = 25_000;
-const HANDSHAKE_TIMEOUT_MS = 20_000;
+const HANDSHAKE_TIMEOUT_MS = 45_000;
 
 function arenaHttpOrigin(arenaUrl: string): string {
   const wsBase = arenaUrl.replace(/\/$/, "");
@@ -159,7 +159,7 @@ export function runAgent(brain: Brain): void {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let openTimer: ReturnType<typeof setTimeout> | null = null;
   let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
-  let synced = false;
+  let handshaked = false;
   let lastConnectAt = 0;
   let fatalAuth = false;
 
@@ -206,9 +206,9 @@ export function runAgent(brain: Brain): void {
     reconnectTimer = setTimeout(() => void boot(), delayMs);
   };
 
-  const markSynced = (): void => {
-    if (synced) return;
-    synced = true;
+  const markHandshaked = (): void => {
+    if (handshaked) return;
+    handshaked = true;
     backoff = MIN_BACKOFF_MS;
     if (handshakeTimer) {
       clearTimeout(handshakeTimer);
@@ -219,8 +219,8 @@ export function runAgent(brain: Brain): void {
   const armHandshakeTimeout = (ws: WebSocket): void => {
     if (handshakeTimer) clearTimeout(handshakeTimer);
     handshakeTimer = setTimeout(() => {
-      if (ws !== activeWs || synced) return;
-      console.warn("Timed out waiting for server handshake — reconnecting.");
+      if (ws !== activeWs || handshaked) return;
+      console.warn("Timed out waiting for welcome — reconnecting.");
       try {
         ws.close();
       } catch {
@@ -229,10 +229,15 @@ export function runAgent(brain: Brain): void {
     }, HANDSHAKE_TIMEOUT_MS);
   };
 
+  const bumpHandshakeTimeout = (ws: WebSocket): void => {
+    if (handshaked) return;
+    armHandshakeTimeout(ws);
+  };
+
   const connect = (): void => {
     if (fatalAuth) return;
     if (activeWs?.readyState === WebSocket.CONNECTING) return;
-    if (activeWs?.readyState === WebSocket.OPEN && (synced || handshakeTimer)) return;
+    if (activeWs?.readyState === WebSocket.OPEN && (handshaked || handshakeTimer)) return;
 
     const now = Date.now();
     if (now - lastConnectAt < CONNECT_DEBOUNCE_MS) {
@@ -242,7 +247,7 @@ export function runAgent(brain: Brain): void {
     lastConnectAt = now;
 
     closeActiveWs();
-    synced = false;
+    handshaked = false;
 
     const ws = new WebSocket(`${arenaUrl}/agent`, {
       headers: { Authorization: `Bearer ${key}` },
@@ -269,7 +274,7 @@ export function runAgent(brain: Brain): void {
         openTimer = null;
       }
       armHandshakeTimeout(ws);
-      console.log(`Connected to ${arenaUrl}; ${brain.banner}`);
+      console.log(`Connected to ${arenaUrl}; waiting for welcome… (${brain.banner})`);
     });
 
     ws.on("unexpected-response", (_req, res) => {
@@ -288,6 +293,7 @@ export function runAgent(brain: Brain): void {
       activeWs = null;
       clearConnectTimers();
       inFlight?.abort();
+      handshaked = false;
       if (fatalAuth) return;
 
       let delay = backoff;
@@ -309,28 +315,51 @@ export function runAgent(brain: Brain): void {
         return;
       }
 
-      if (
-        msg.type === "sync" ||
-        msg.type === "welcome" ||
-        msg.type === "round_start" ||
-        msg.type === "state"
-      ) {
-        markSynced();
+      if (msg.type === "sync" || msg.type === "heartbeat") {
+        bumpHandshakeTimeout(ws);
+        return;
       }
 
       if (msg.type === "welcome") {
+        markHandshaked();
+        console.log(`Session ready (${String(msg.you_id ?? "agent")}). ${brain.banner}`);
         return;
       }
+
       if (msg.type === "round_start") {
+        if (!handshaked) {
+          bumpHandshakeTimeout(ws);
+          return;
+        }
         if (msg.rules) rules = msg.rules as Rules;
         console.log(`Round ${msg.round} started — rules: ${rules ? rules.name : "classic"}.`);
         return;
       }
+      if (msg.type === "queued") {
+        if (!handshaked) {
+          bumpHandshakeTimeout(ws);
+          return;
+        }
+        const pos = msg.position != null ? `#${msg.position}` : "pending";
+        const total = msg.queued != null ? ` of ${msg.queued}` : "";
+        console.log(
+          `Queued for round ${msg.round} (${pos}${total}, cap ${msg.cap}, ${msg.reason ?? "waiting"}).`,
+        );
+        return;
+      }
       if (msg.type === "dead") {
+        if (!handshaked) {
+          bumpHandshakeTimeout(ws);
+          return;
+        }
         console.log(`Died at tick ${msg.tick}, peak size ${msg.peak_size}.`);
         return;
       }
       if (msg.type === "round_end") {
+        if (!handshaked) {
+          bumpHandshakeTimeout(ws);
+          return;
+        }
         const top = (msg.standings as { display_name?: string; peak_size?: number }[] | undefined)?.[0];
         let line = `Round ${msg.round} ended. Winner: ${top?.display_name} (peak ${top?.peak_size}).`;
         const y = msg.your as
@@ -355,6 +384,10 @@ export function runAgent(brain: Brain): void {
         return;
       }
       if (msg.type !== "state") return;
+      if (!handshaked) {
+        bumpHandshakeTimeout(ws);
+        return;
+      }
 
       const state = msg.state as State;
       // The arena echoes the active rules on every state too; keep ours fresh so a

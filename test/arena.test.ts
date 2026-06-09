@@ -122,6 +122,72 @@ describe("arena round lifecycle", () => {
     arena.stop();
   });
 
+  it("currentFrame reports live state for mid-round spectator catch-up", () => {
+    const arena = new Arena(
+      { broadcastSpectators: () => {} },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 5000, maxTicks: 50, obstacleDensity: 0 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, roundRestartDelayMs: 1_000_000 },
+      null,
+      null,
+    );
+
+    arena.start();
+
+    const snap = arena.currentFrame();
+    expect(snap.waiting).toBe(false);
+    expect(snap.intermission).toBe(false);
+    expect(snap.frame).toBeTruthy();
+    expect(snap.frame!.snakes.length).toBeGreaterThan(0);
+    expect(snap.rules?.objective).toBeTruthy();
+    expect(snap.deliberation?.agents?.length).toBe(3);
+
+    arena.stop();
+  });
+
+  it("catchUpAgent sends state to a playing agent mid-round", () => {
+    const arena = new Arena(
+      { broadcastSpectators: () => {} },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 5000, maxTicks: 50, obstacleDensity: 0 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, roundRestartDelayMs: 1_000_000 },
+      null,
+      null,
+    );
+    const a = fakeAgent("alice");
+    arena.addAgent(a);
+    arena.start();
+    a.inbox.length = 0;
+
+    arena.catchUpAgent(a);
+
+    const state = a.inbox.find((m) => m.type === "state");
+    expect(state).toBeTruthy();
+    expect(state.rules?.objective).toBeTruthy();
+    expect(state.state.tick).toBe(0);
+
+    arena.stop();
+  });
+
+  it("catchUpAgent tells a mid-round joiner they are waiting", () => {
+    const arena = new Arena(
+      { broadcastSpectators: () => {} },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 5000, maxTicks: 50, obstacleDensity: 0 },
+      { ...DEFAULT_SERVER_CONFIG, minSnakes: 3, maxAgentsPerRound: 48, roundRestartDelayMs: 1_000_000 },
+      null,
+      null,
+    );
+    arena.start();
+    const late = fakeAgent("latecomer");
+    arena.addAgent(late);
+
+    arena.catchUpAgent(late);
+
+    const queued = late.inbox.find((m) => m.type === "queued");
+    expect(queued).toBeTruthy();
+    expect(queued.reason).toBe("round_in_progress");
+
+    arena.stop();
+  });
+
   it("ignores stale-tick actions but accepts current-tick moves", () => {
     const arena = new Arena(
       { broadcastSpectators: () => {} },

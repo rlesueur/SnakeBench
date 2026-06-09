@@ -72,6 +72,9 @@ async function resolveIdentity(key: string | null | undefined): Promise<Identity
 // --- spectator broadcast (with FPS throttle) --------------------------------
 const spectators = new Set<WebSocket>();
 const spectatorsByIp = new Map<string, number>();
+/** Handshakes in progress — count toward caps so a burst of connects cannot
+ * bypass MAX_SPECTATORS while init snapshots are still serialising. */
+let pendingSpectators = 0;
 let lastFrameAt = 0;
 function broadcastSpectators(msg: unknown): void {
   const isFrame = (msg as { type?: string }).type === "frame";
@@ -494,7 +497,7 @@ httpServer.on("upgrade", async (req, socket, head) => {
       agentWss.emit("connection", ws, identity.displayName, accountKey);
     });
   } else if (url.pathname === "/spectate") {
-    if (spectators.size >= MAX_SPECTATORS) {
+    if (spectators.size + pendingSpectators >= MAX_SPECTATORS) {
       socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
       socket.destroy();
       return;
@@ -556,11 +559,9 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
   };
   resetIdle();
 
-  // Lightweight ack first so the client knows the socket is live before we
-  // serialise the (possibly large) welcome payload.
+  // Handshake order is fixed: sync → welcome → catch-up (state|queued|dead).
+  // Registration waits until welcome so tick traffic cannot arrive first.
   sendAgent(ws, { type: "sync" });
-  arena.addAgent(session);
-  console.log(`Agent connected: ${displayName} (${snakeId})`);
   setImmediate(() => {
     if (ws.readyState !== WebSocket.OPEN) return;
     session.send({
@@ -569,10 +570,15 @@ agentWss.on("connection", (ws: WebSocket, displayName: string, accountKey: strin
       config,
       docs: { skill: "/api/skill", guide: "/api/guide", human: "/guide.html" },
     });
+    arena.addAgent(session);
+    arena.catchUpAgent(session);
   });
+  console.log(`Agent connected: ${displayName} (${snakeId})`);
 
   const pingIv = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) ws.ping();
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.ping();
+    sendAgent(ws, { type: "heartbeat", ts: Date.now() });
   }, 25_000);
 
   let msgCount = 0;
@@ -639,24 +645,43 @@ function sendSpectator(ws: WebSocket, msg: unknown): void {
 }
 
 spectatorWss.on("connection", (ws: WebSocket, ip: string) => {
-  spectators.add(ws);
+  pendingSpectators += 1;
   spectatorsByIp.set(ip, (spectatorsByIp.get(ip) ?? 0) + 1);
+  let subscribed = false;
+  const subscribe = () => {
+    if (subscribed) return;
+    subscribed = true;
+    spectators.add(ws);
+  };
+  const finishHandshake = () => {
+    if (pendingSpectators > 0) pendingSpectators -= 1;
+    if (ws.readyState === WebSocket.OPEN) subscribe();
+  };
   // Lightweight ack first so the client knows the socket is live before we
   // serialise a (possibly large) board snapshot on the next tick.
   sendSpectator(ws, { type: "sync" });
   setImmediate(() => {
-    if (ws.readyState !== WebSocket.OPEN) return;
+    if (ws.readyState !== WebSocket.OPEN) {
+      finishHandshake();
+      return;
+    }
     try {
       const frame = arena.currentFrame();
       sendSpectator(ws, { type: "init", ...frame });
       sendSpectator(ws, { type: "leaderboard", board: arena.leaderboard() });
     } catch (err) {
       console.warn("spectator init failed:", (err as Error).message);
+      let round = 0;
+      try {
+        round = arena.currentFrame().round;
+      } catch {
+        /* arena may be mid-restart */
+      }
       sendSpectator(ws, {
         type: "init",
         waiting: true,
         intermission: true,
-        round: 0,
+        round,
         next_round_in_ms: null,
         world: null,
         obstacles: [],
@@ -665,6 +690,10 @@ spectatorWss.on("connection", (ws: WebSocket, ip: string) => {
         deliberation: null,
       });
     }
+    // Join the live broadcast only after catch-up messages are queued — otherwise
+    // a mid-tick frame/deliberation can race ahead of init and leave the client
+    // "live" with an empty or partial board.
+    finishHandshake();
   });
   // Keep the socket alive through idle proxies (Render, CDNs) and give the
   // client a visible heartbeat so it can detect a dead connection without refresh.
@@ -675,7 +704,8 @@ spectatorWss.on("connection", (ws: WebSocket, ip: string) => {
   }, 25_000);
   ws.on("close", () => {
     clearInterval(pingIv);
-    spectators.delete(ws);
+    if (subscribed) spectators.delete(ws);
+    else if (pendingSpectators > 0) pendingSpectators -= 1;
     const n = (spectatorsByIp.get(ip) ?? 1) - 1;
     if (n <= 0) spectatorsByIp.delete(ip);
     else spectatorsByIp.set(ip, n);
