@@ -617,10 +617,16 @@ function sendSpectator(ws: WebSocket, msg: unknown): void {
 spectatorWss.on("connection", (ws: WebSocket, ip: string) => {
   spectators.add(ws);
   spectatorsByIp.set(ip, (spectatorsByIp.get(ip) ?? 0) + 1);
-  // Always send init so the client can leave the loading state — even when the
-  // arena is between rounds or retrying a failed start (waiting: true).
-  sendSpectator(ws, { type: "init", ...arena.currentFrame() });
-  sendSpectator(ws, { type: "leaderboard", board: arena.leaderboard() });
+  // Lightweight ack first so the client knows the socket is live before we
+  // serialise a (possibly large) board snapshot on the next tick.
+  sendSpectator(ws, { type: "sync" });
+  const frame = arena.currentFrame();
+  const board = arena.leaderboard();
+  setImmediate(() => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    sendSpectator(ws, { type: "init", ...frame });
+    sendSpectator(ws, { type: "leaderboard", board });
+  });
   // Keep the socket alive through idle proxies (Render, CDNs).
   const pingIv = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) ws.ping();
