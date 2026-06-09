@@ -36,7 +36,7 @@ interface PlannedMove {
 }
 
 /** Why a snake died this tick (for the spectator kill feed). */
-export type DeathCause = "wall" | "obstacle" | "body" | "head2head" | "poison" | "unlawful";
+export type DeathCause = "wall" | "obstacle" | "body" | "head2head" | "poison" | "unlawful" | "timeout";
 
 /** A notable event produced by a single `step`, for spectators/commentary. */
 export type GameEvent =
@@ -247,8 +247,6 @@ export class Game {
     }
   }
 
-  // --- the tick ------------------------------------------------------------
-
   /** Advance one tick. `moves` gives each snake's chosen direction. */
   step(moves: Map<string, Direction>): GameEvent[] {
     const events: GameEvent[] = [];
@@ -399,6 +397,28 @@ export class Game {
     this.replenishFood();
     this.tick += 1;
     return events;
+  }
+
+  /** Force-eliminate a snake (e.g. repeated action timeouts). Drops a carcass like
+   * a normal death but does not advance the tick counter. */
+  eliminate(id: string, cause: DeathCause): GameEvent | null {
+    const snake = this.snakeById(id);
+    if (!snake || !snake.alive) return null;
+    snake.alive = false;
+    snake.diedAtTick = this.tick + 1;
+    for (const c of snake.body) {
+      if (this.inBounds(c) && !this.obstacles.has(cellKey(c))) {
+        this.food.set(cellKey(c), this.config.carcassFoodValue);
+      }
+    }
+    return {
+      kind: "death",
+      id: snake.id,
+      displayName: snake.displayName,
+      isNpc: snake.isNpc,
+      cause,
+      tick: this.tick,
+    };
   }
 
   private headFrom(snake: Snake, heading: Direction): Cell {

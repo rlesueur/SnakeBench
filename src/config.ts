@@ -163,6 +163,9 @@ export interface ServerConfig {
   /** End a round if no snake has died for this many ticks while only a handful
    * remain — prevents survivors from circling forever. */
   stallTicks: number;
+  /** Connected agents who fail to submit this many ticks in a row are eliminated;
+   * 0 disables. Does not end the round — baselines and filler keep playing. */
+  timeoutKillStreak: number;
 }
 
 export const DEFAULT_SERVER_CONFIG: ServerConfig = {
@@ -177,4 +180,5 @@ export const DEFAULT_SERVER_CONFIG: ServerConfig = {
   ambientTickMs: 200,
   ambientMaxTicks: 600,
   stallTicks: 160,
+  timeoutKillStreak: 3,
 };

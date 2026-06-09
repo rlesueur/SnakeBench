@@ -33,7 +33,12 @@ and three fixed baseline competitors so there is always something worth watching
   still alive has submitted — connected agents plus the three baselines (Shelter, Stalker,
   Feast). Filler NPCs do not gate this. Baselines lock in on a short stagger (~1s after each
   `state`), so after you submit the tick usually resolves within about a second unless a
-  baseline is dead. If you miss the ceiling, you keep your current heading.
+  baseline is dead. If you miss the ceiling, you keep your current heading **for that tick
+  only**.
+- **Repeated timeouts:** a connected agent that misses **3 consecutive ticks** without
+  submitting is **eliminated** (death cause `timeout`). The **round keeps going** for
+  baselines and filler NPCs — timeouts alone do not end the round. Any submitted move resets
+  the streak.
 - Snakes start at length **5** by default; kill-focused cards start **longer** (8–9).
 
 ### Food and growth
@@ -55,6 +60,8 @@ and three fixed baseline competitors so there is always something worth watching
 
 - You die if your head enters a **wall**, static **obstacle** (~0.9% of cells), or **any**
   snake body. **Laws** can change what counts as deadly (see below).
+- **Action timeouts:** one missed tick → keep your current heading; **three consecutive**
+  missed ticks → your snake is eliminated (`timeout`). The round continues for everyone else.
 - **Cut-off kills:** a rival's head into **your** body → they die, **you get the kill**, and
   you absorb part of their length (35% base; more on bounty rounds).
 - **Head-to-head:** same cell, two heads → **longer** snake wins (ties kill both).
@@ -127,8 +134,8 @@ Snakes are ranked by the card's **objective**. The round stops at the first of:
   not in the live eight-card catalogue today**);
 - **stalemate** — ≤3 survivors with no deaths for **160 ticks**.
 
-If your agent dies early, the round **continues** for others unless you were the last scored
-competitor. ~**2 seconds** later the next round starts.
+If your agent dies early (including timeout elimination), the round **continues** for others
+unless you were the last scored competitor. ~**2 seconds** later the next round starts.
 
 ### How many can play
 

@@ -6,7 +6,7 @@ import {
   type GameConfig,
   type ServerConfig,
 } from "../config.js";
-import { Game, type SnakeSpec } from "../engine/game.js";
+import { Game, type SnakeSpec, type GameEvent } from "../engine/game.js";
 import { Rng } from "../rng.js";
 import { BASELINE_COUNT, BASELINE_KINDS, BASELINE_ROSTER, baselineIntent } from "../npc/baselines.js";
 import { NPC_REGISTRY, NPC_ANCHOR, type NpcKind } from "../npc/bots.js";
@@ -134,6 +134,8 @@ interface QualityAcc {
   moves: number;
   legal: number;
   timeouts: number;
+  /** Consecutive ticks without a submitted move (connected agents only). */
+  timeoutStreak: number;
   safeOpp: number;
   safeChosen: number;
   spaceSum: number;
@@ -161,6 +163,7 @@ function freshQualityAcc(): QualityAcc {
     moves: 0,
     legal: 0,
     timeouts: 0,
+    timeoutStreak: 0,
     safeOpp: 0,
     safeChosen: 0,
     spaceSum: 0,
@@ -933,8 +936,9 @@ export class Arena {
     }
 
     this.recordDecisionQuality(game, moves);
+    const timeoutDeaths = this.eliminateTimedOutAgents(game);
 
-    const events = game.step(moves);
+    const events = [...timeoutDeaths, ...game.step(moves)];
 
     // Tally head-to-head kills for round-end highlights.
     for (const e of events) {
@@ -995,6 +999,21 @@ export class Arena {
 
     // Open the next decision window and arm its ceiling.
     this.openDecisionWindow();
+  }
+
+  /** Drop connected agents who have missed too many ticks in a row. The round
+   * keeps going for baselines and filler NPCs. */
+  private eliminateTimedOutAgents(game: Game): GameEvent[] {
+    const threshold = this.serverConfig.timeoutKillStreak;
+    if (threshold <= 0) return [];
+    const out: GameEvent[] = [];
+    for (const [snakeId, acc] of this.roundQuality) {
+      if (!this.agents.has(snakeId)) continue;
+      if (acc.timeoutStreak < threshold) continue;
+      const ev = game.eliminate(snakeId, "timeout");
+      if (ev) out.push(ev);
+    }
+    return out;
   }
 
   /** Manhattan distance from a cell to the nearest food, or Infinity if none. */
@@ -1059,6 +1078,8 @@ export class Arena {
       acc.moves += 1;
       if (a.legal) acc.legal += 1;
       if (a.timeout) acc.timeouts += 1;
+      if (a.timeout) acc.timeoutStreak += 1;
+      else acc.timeoutStreak = 0;
       if (a.hadSafeAlternative) {
         acc.safeOpp += 1;
         if (a.choseSafe) acc.safeChosen += 1;

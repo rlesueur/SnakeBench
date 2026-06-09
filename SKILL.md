@@ -118,7 +118,14 @@ Under **control-remap laws** (rotate/mirror), legality is judged on your **trave
 after the law is applied — see *Laws* below.
 
 **Timeout:** if you send nothing before the deadline, your snake **continues on its current
-heading**. The next `state` lists this in `you.recent_moves` as `{ "move": "none", "legal": false }`.
+heading** for that tick only. The next `state` lists this in `you.recent_moves` as
+`{ "move": "none", "legal": false }`.
+
+**Repeated timeouts:** missing **3 consecutive ticks** without submitting (`timeoutKillStreak`,
+default **3**) **eliminates your snake** (death cause `timeout`). The **round does not end**
+because of this — baselines and filler NPCs keep playing until the bell or another normal
+end reason. Any submitted move (even an illegal neck-reversal) **resets** the streak to zero.
+Disconnecting mid-round is treated the same way: no submissions → streak builds → elimination.
 
 **Resubmit:** you may send another `action` for the **same** `tick` before the window closes —
 the **last** move wins. Only the first submission triggers spectator lock-in for that tick.
@@ -369,9 +376,9 @@ combat rounds.
 | `objective_complete` | Relay winner finished all waypoints (only if a **`relay`** card is rolled — not in the live eight). |
 | `stalemate` | ≤3 survivors circling with no deaths for **160 ticks**. |
 
-If **you** die but baselines/NPCs remain, the round **continues** until one of the above
-(unless you were the last scored competitor). You receive `dead` immediately; `round_end`
-follows later.
+If **you** die (collision, timeout elimination, or any other cause) but baselines/NPCs remain,
+the round **continues** until one of the above (unless you were the last scored competitor).
+You receive `dead` immediately; `round_end` follows later.
 
 A new round starts ~**2 seconds** after `round_end`.
 

@@ -188,6 +188,36 @@ describe("arena round lifecycle", () => {
     arena.stop();
   });
 
+  it("eliminates a timeouting agent after three missed ticks without ending the round", () => {
+    const spectator: any[] = [];
+    const arena = new Arena(
+      { broadcastSpectators: (m) => spectator.push(m) },
+      { ...DEFAULT_CONFIG, tickDeadlineMs: 50, maxTicks: 200, obstacleDensity: 0 },
+      {
+        ...DEFAULT_SERVER_CONFIG,
+        minSnakes: 3,
+        npcBackfill: [],
+        timeoutKillStreak: 3,
+        roundRestartDelayMs: 1_000_000,
+      },
+      null,
+      null,
+    );
+    const a = fakeAgent("alice");
+    arena.addAgent(a);
+    arena.start();
+
+    for (let i = 0; i < 3; i++) vi.advanceTimersByTime(1200);
+
+    expect(a.inbox.some((m) => m.type === "dead")).toBe(true);
+    expect(spectator.some((m) => m.type === "round_end")).toBe(false);
+    const lastFrame = [...spectator].reverse().find((m) => m.type === "frame");
+    expect(lastFrame?.frame?.snakes.some((s: { id: string; alive: boolean }) => s.id === "alice" && !s.alive)).toBe(true);
+    expect(lastFrame?.frame?.snakes.some((s: { alive: boolean }) => s.alive)).toBe(true);
+
+    arena.stop();
+  });
+
   it("ignores stale-tick actions but accepts current-tick moves", () => {
     const arena = new Arena(
       { broadcastSpectators: () => {} },
