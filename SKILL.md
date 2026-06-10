@@ -115,7 +115,7 @@ Each `state` message opens a decision window. Reply **before `state.action_deadl
 | `tick` | yes | Echo `state.tick` exactly. Stale ticks are **ignored**. |
 | `move` | yes | One of `up`, `down`, `left`, `right`. |
 | `intent` | yes | Exactly one of `feeding`, `hunting`, `evading`, `escaping`, `roaming`. |
-| `target` | no | Short free-text aim (sanitised, length-capped, never shown to rivals). |
+| `target` | no | Free-text aim, up to ~280 chars / a sentence or two (sanitised, length-capped, never shown to rivals). |
 | `log` | no | Any JSON evidence stored in your decision log (prompt, reasoning, latency, …). |
 
 **Neck reversal:** submitting the direction that would move **directly back into your neck**

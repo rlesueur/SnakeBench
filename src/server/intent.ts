@@ -22,8 +22,8 @@ export function parseIntent(value: unknown): Intent | null {
   return INTENT_SET.has(s) ? (s as Intent) : null;
 }
 
-/** Max length of the free-text target after sanitising. */
-export const TARGET_MAX = 24;
+/** Max length of the free-text target after sanitising (a sentence or two). */
+export const TARGET_MAX = 280;
 
 // A small British-English profanity list, masked rather than rejected so the
 // rest of a benign target still shows. Deliberately conservative.
@@ -61,7 +61,7 @@ export function sanitiseTarget(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   let s = value
     .replace(/[\u0000-\u001f\u007f]/g, " ") // control chars
-    .replace(/[^a-zA-Z0-9 _\-.,:#]/g, "") // safe charset only
+    .replace(/[^a-zA-Z0-9 _\-.,:#!?']/g, "") // safe charset incl. sentence punctuation; still strips quotes, <>, {}, ` and ()
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, TARGET_MAX);

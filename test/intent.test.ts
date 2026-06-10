@@ -29,6 +29,14 @@ describe("target sanitising", () => {
     expect(s).not.toContain("(");
   });
 
+  it("keeps natural sentence punctuation", () => {
+    const s = sanitiseTarget("I'm boxing it in. Can't reach food yet — will I escape?");
+    expect(s).toContain("'");
+    expect(s).toContain("?");
+    expect(s).toContain(".");
+    expect(s).not.toContain("—"); // non-ASCII dash still stripped
+  });
+
   it("caps the length", () => {
     const s = sanitiseTarget("x".repeat(100));
     expect((s ?? "").length).toBeLessThanOrEqual(TARGET_MAX);
